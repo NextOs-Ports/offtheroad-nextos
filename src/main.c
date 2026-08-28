@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,11 +48,16 @@
 #include "imports.h"
 #include "jni_shim.h"
 #include "opensles_shim.h"
+#include "otr_exit_monitor.h"
+#include "otr_gptk.h"
+#include "otr_runtime_evidence.h"
 #include "so_util.h"
 #include "util.h"
 
 #include "nxgl_frame_proof_adapter.h"
 #include "nxgl_provider_discovery_adapter.h"
+#include "nxinput_evdev_chord.h"
+#include "nxinput_gptk.h"
 
 #define CXX_SO "lib/libc++_shared.so"
 #define GAME_SO "lib/libgame.so"
@@ -86,13 +92,23 @@ static void (*e_padButtonDown)(void *env, void *obj, int devId, int type, int ke
 static void (*e_padButtonUp)(void *env, void *obj, int devId, int type, int keyCode);
 static void (*e_padAxis)(void *env, void *obj, int devId, int type, int axis, float v);
 
+/* Exported xGen state, resolved by symbol (never by an offset).  A non-NULL
+ * local player is the conservative boundary between touch-driven menus and
+ * gameplay/camera authority. */
+static void **e_multiSingleton;
+static void *(*e_multiGetLocalPlayer)(void *multi);
+
 static void *g_env = NULL;
 static void *g_vm = NULL;
 static SDL_Window *g_window = NULL;
 static SDL_GLContext g_gl_ctx = NULL;
 static SDL_GameController *g_pad = NULL;
+static pthread_mutex_t g_pad_mutex = PTHREAD_MUTEX_INITIALIZER;
+static otr_exit_monitor g_exit_monitor;
+static int g_exit_monitor_active;
 
-static volatile int g_running = 1;
+static atomic_bool g_running = ATOMIC_VAR_INIT(true);
+static atomic_bool g_exit_deadline_started = ATOMIC_VAR_INIT(false);
 static int g_screen_w = 1280;
 static int g_screen_h = 720;
 
@@ -245,9 +261,106 @@ static void parse_detail_env(void) {
 }
 
 static void trigger_exit(const char *reason) {
-  if (!g_running) return;
+  if (!atomic_exchange_explicit(&g_running, false, memory_order_acq_rel)) return;
   debugPrintf("[main] saindo: %s\n", reason);
-  g_running = 0;
+}
+
+/* The watcher detects and delivers the chord without entering pump_input or
+ * the guest frame. The deadline is terminal insurance only: the normal path
+ * gets two seconds to run pause/stop, persist receipts and quiesce audio. */
+static void *exit_deadline_thread(void *opaque) {
+  (void)opaque;
+  usleep(2000000);
+  debugPrintf("[input] host exit deadline reached; returning to launcher\n");
+  _exit(0);
+  return NULL;
+}
+
+static int exit_monitor_sample(void *opaque, otr_exit_sample *sample) {
+  SDL_GameControllerButtonBind back;
+  SDL_GameControllerButtonBind start;
+  SDL_Joystick *joystick;
+  int authoritative = 0;
+  int chord_down = 0;
+  (void)opaque;
+  if (sample == NULL) return -1;
+  memset(sample, 0, sizeof(*sample));
+
+  pthread_mutex_lock(&g_pad_mutex);
+  if (g_pad != NULL && SDL_GameControllerGetAttached(g_pad)) {
+    SDL_GameControllerUpdate();
+    back = SDL_GameControllerGetBindForButton(
+        g_pad, SDL_CONTROLLER_BUTTON_BACK);
+    start = SDL_GameControllerGetBindForButton(
+        g_pad, SDL_CONTROLLER_BUTTON_START);
+    authoritative = back.bindType != SDL_CONTROLLER_BINDTYPE_NONE &&
+                    start.bindType != SDL_CONTROLLER_BINDTYPE_NONE;
+    if (authoritative) {
+      chord_down = SDL_GameControllerGetButton(
+                       g_pad, SDL_CONTROLLER_BUTTON_BACK) != 0 &&
+                   SDL_GameControllerGetButton(
+                       g_pad, SDL_CONTROLLER_BUTTON_START) != 0;
+      /* Canonical SDL2 route: some CFW mappings expose BACK/START but fail to
+       * propagate them through GameController. Read the mapping's own raw
+       * joystick indices as the second SDL-primary view; never derive evdev
+       * codes from those indices. */
+      joystick = SDL_GameControllerGetJoystick(g_pad);
+      if (!chord_down && joystick != NULL &&
+          back.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
+          start.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON &&
+          back.value.button != start.value.button)
+        chord_down = SDL_JoystickGetButton(joystick, back.value.button) != 0 &&
+                     SDL_JoystickGetButton(joystick, start.value.button) != 0;
+      sample->select_down = chord_down;
+      sample->start_down = chord_down;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+
+  sample->primary_authoritative = authoritative;
+  nx_evdev_chord_set_primary_active(authoritative);
+  if (!authoritative) sample->fallback_fired = nx_evdev_chord_poll();
+  return 0;
+}
+
+static void exit_monitor_deliver(void *opaque, otr_exit_source source) {
+  char receipt[256];
+  pthread_t deadline;
+  (void)opaque;
+  if (otr_exit_monitor_format_receipt(&g_exit_monitor, receipt,
+                                      sizeof(receipt)) == 0)
+    debugPrintf("%s\n", receipt);
+  trigger_exit(source == OTR_EXIT_SOURCE_SDL_PRIMARY
+                   ? "SELECT+START (SDL host watcher)"
+                   : "SELECT+START (evdev host fallback)");
+  if (atomic_exchange_explicit(&g_exit_deadline_started, true,
+                               memory_order_acq_rel))
+    return;
+  if (pthread_create(&deadline, NULL, exit_deadline_thread, NULL) == 0) {
+    (void)pthread_detach(deadline);
+    return;
+  }
+  debugPrintf("[input] host exit deadline unavailable; returning now\n");
+  _exit(0);
+}
+
+static int exit_monitor_start_runtime(void) {
+  nx_evdev_chord_open();
+  if (otr_exit_monitor_start(&g_exit_monitor, exit_monitor_sample,
+                             exit_monitor_deliver, NULL, 16000u) != 0) {
+    nx_evdev_chord_close();
+    return -1;
+  }
+  g_exit_monitor_active = 1;
+  debugPrintf("[input] host exit monitor active interval_us=16000\n");
+  return 0;
+}
+
+static void exit_monitor_stop_runtime(void) {
+  if (!g_exit_monitor_active) return;
+  g_exit_monitor_active = 0;
+  otr_exit_monitor_stop(&g_exit_monitor);
+  nx_evdev_chord_close();
 }
 
 /* ------------------------------------------------------------- modulos ---- */
@@ -289,7 +402,7 @@ static GLint g_cursor_u_pos = -1, g_cursor_u_res = -1, g_cursor_u_color = -1;
 static float g_cursor_x = 640.0f, g_cursor_y = 360.0f;
 static bool g_cursor_pressed = false;
 static bool g_cursor_visible = false;
-static bool g_cursor_mode = false;   /* L3 liga/desliga o modo ponteiro */
+static bool g_gameplay_context = false;
 
 static void init_cursor_renderer(void) {
   const char *vs_src =
@@ -341,7 +454,10 @@ static void init_cursor_renderer(void) {
 static void draw_cursor(void) {
   if (!g_cursor_visible || !g_cursor_prog) return;
 
-  GLint prev_prog = 0, prev_vbo = 0, prev_bsrc = GL_ONE, prev_bdst = GL_ZERO;
+  GLint prev_prog = 0, prev_vbo = 0;
+  GLint prev_bsrc_rgb = GL_ONE, prev_bdst_rgb = GL_ZERO;
+  GLint prev_bsrc_alpha = GL_ONE, prev_bdst_alpha = GL_ZERO;
+  GLint prev_beq_rgb = GL_FUNC_ADD, prev_beq_alpha = GL_FUNC_ADD;
   GLboolean prev_blend, prev_depth, prev_cull, prev_scissor;
   GLint attr_enabled[4] = {0, 0, 0, 0};
   GLint a0_size = 4, a0_type = GL_FLOAT, a0_norm = 0, a0_stride = 0, a0_buf = 0;
@@ -349,8 +465,12 @@ static void draw_cursor(void) {
 
   glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
   glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev_vbo);
-  glGetIntegerv(GL_BLEND_SRC_RGB, &prev_bsrc);
-  glGetIntegerv(GL_BLEND_DST_RGB, &prev_bdst);
+  glGetIntegerv(GL_BLEND_SRC_RGB, &prev_bsrc_rgb);
+  glGetIntegerv(GL_BLEND_DST_RGB, &prev_bdst_rgb);
+  glGetIntegerv(GL_BLEND_SRC_ALPHA, &prev_bsrc_alpha);
+  glGetIntegerv(GL_BLEND_DST_ALPHA, &prev_bdst_alpha);
+  glGetIntegerv(GL_BLEND_EQUATION_RGB, &prev_beq_rgb);
+  glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &prev_beq_alpha);
   prev_blend = glIsEnabled(GL_BLEND);
   prev_depth = glIsEnabled(GL_DEPTH_TEST);
   prev_cull = glIsEnabled(GL_CULL_FACE);
@@ -368,7 +488,9 @@ static void draw_cursor(void) {
   glDisable(GL_CULL_FACE);
   glDisable(GL_SCISSOR_TEST);
   glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+  glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE,
+                      GL_ONE_MINUS_SRC_ALPHA);
 
   glUseProgram(g_cursor_prog);
   glUniform2f(g_cursor_u_pos, g_cursor_x, g_cursor_y);
@@ -393,7 +515,9 @@ static void draw_cursor(void) {
   }
   glBindBuffer(GL_ARRAY_BUFFER, prev_vbo);
   glUseProgram(prev_prog);
-  glBlendFunc((GLenum)prev_bsrc, (GLenum)prev_bdst);
+  glBlendEquationSeparate((GLenum)prev_beq_rgb, (GLenum)prev_beq_alpha);
+  glBlendFuncSeparate((GLenum)prev_bsrc_rgb, (GLenum)prev_bdst_rgb,
+                      (GLenum)prev_bsrc_alpha, (GLenum)prev_bdst_alpha);
   if (prev_blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
   if (prev_depth) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
   if (prev_cull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
@@ -416,11 +540,35 @@ static void pad_axis(int axis, float v) {
 
 static void pad_button(int keycode, bool down) {
   if (down) {
-    if (e_padButtonDown) e_padButtonDown(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE, keycode);
-    if (e_nativeKeyDown) e_nativeKeyDown(g_env, NULL, keycode);
+    if (e_padButtonDown)
+      e_padButtonDown(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE, keycode);
+    else if (e_nativeKeyDown)
+      e_nativeKeyDown(g_env, NULL, keycode);
   } else {
-    if (e_padButtonUp) e_padButtonUp(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE, keycode);
-    if (e_nativeKeyUp) e_nativeKeyUp(g_env, NULL, keycode);
+    if (e_padButtonUp)
+      e_padButtonUp(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE, keycode);
+    else if (e_nativeKeyUp)
+      e_nativeKeyUp(g_env, NULL, keycode);
+  }
+}
+
+static int sdl_btn_to_gptk(int b) {
+  switch (b) {
+    case SDL_CONTROLLER_BUTTON_A: return NXINPUT_GPTK_A;
+    case SDL_CONTROLLER_BUTTON_B: return NXINPUT_GPTK_B;
+    case SDL_CONTROLLER_BUTTON_X: return NXINPUT_GPTK_X;
+    case SDL_CONTROLLER_BUTTON_Y: return NXINPUT_GPTK_Y;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return NXINPUT_GPTK_L1;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return NXINPUT_GPTK_R1;
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK: return NXINPUT_GPTK_L3;
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return NXINPUT_GPTK_R3;
+    case SDL_CONTROLLER_BUTTON_START: return NXINPUT_GPTK_START;
+    case SDL_CONTROLLER_BUTTON_BACK: return NXINPUT_GPTK_SELECT;
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return NXINPUT_GPTK_UP;
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return NXINPUT_GPTK_DOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return NXINPUT_GPTK_LEFT;
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return NXINPUT_GPTK_RIGHT;
+    default: return -1;
   }
 }
 
@@ -449,13 +597,21 @@ static int sdl_btn_to_android(int b) {
 }
 
 static void open_pad(int which) {
-  if (g_pad) return;
+  SDL_GameController *controller;
+  uint32_t primary_mask = 0u;
+  pthread_mutex_lock(&g_pad_mutex);
+  if (g_pad != NULL) {
+    pthread_mutex_unlock(&g_pad_mutex);
+    return;
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
   if (!SDL_IsGameController(which)) return;
-  g_pad = SDL_GameControllerOpen(which);
-  if (!g_pad) return;
-  debugPrintf("[input] gamepad: %s\n", SDL_GameControllerName(g_pad));
+  controller = SDL_GameControllerOpen(which);
+  if (!controller) return;
+  memset(g_btn_prev, 0, sizeof(g_btn_prev));
+  debugPrintf("[input] gamepad: %s\n", SDL_GameControllerName(controller));
   {
-    char *map = SDL_GameControllerMapping(g_pad);
+    char *map = SDL_GameControllerMapping(controller);
     debugPrintf("[input] mapping: %s\n", map ? map : "(nenhum)");
     if (map) SDL_free(map);
     {
@@ -467,16 +623,58 @@ static void open_pad(int which) {
           (ot_has_button_fn)dlsym(RTLD_DEFAULT, "SDL_GameControllerHasButton");
       debugPrintf("[input] SELECT(BACK)=%s START=%s\n",
                   !has_button ? "n/d"
-                  : has_button(g_pad, SDL_CONTROLLER_BUTTON_BACK) ? "sim" : "NAO",
+                  : has_button(controller, SDL_CONTROLLER_BUTTON_BACK) ? "sim" : "NAO",
                   !has_button ? "n/d"
-                  : has_button(g_pad, SDL_CONTROLLER_BUTTON_START) ? "sim" : "NAO");
+                  : has_button(controller, SDL_CONTROLLER_BUTTON_START) ? "sim" : "NAO");
     }
   }
+  for (int button = 0; button < SDL_CONTROLLER_BUTTON_MAX; button++) {
+    int control = sdl_btn_to_gptk(button);
+    SDL_GameControllerButtonBind bind;
+    if (control < 0) continue;
+    bind = SDL_GameControllerGetBindForButton(
+        controller, (SDL_GameControllerButton)button);
+    if (bind.bindType != SDL_CONTROLLER_BINDTYPE_NONE)
+      primary_mask |= UINT32_C(1) << (unsigned)control;
+  }
+  /* Sticks/triggers are also authoritative when SDL's inherited mapping has
+   * their physical axes.  The digital source guard uses the same mask for
+   * trigger edges; vector ownership remains context-specific. */
+  if (SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_LEFTX)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE ||
+      SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_LEFTY)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE)
+    primary_mask |= UINT32_C(1) << NXINPUT_GPTK_LEFT_STICK;
+  if (SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE ||
+      SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE)
+    primary_mask |= UINT32_C(1) << NXINPUT_GPTK_RIGHT_STICK;
+  if (SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE)
+    primary_mask |= UINT32_C(1) << NXINPUT_GPTK_L2;
+  if (SDL_GameControllerGetBindForAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+          .bindType != SDL_CONTROLLER_BINDTYPE_NONE)
+    primary_mask |= UINT32_C(1) << NXINPUT_GPTK_R2;
+
+  pthread_mutex_lock(&g_pad_mutex);
+  if (g_pad != NULL) {
+    pthread_mutex_unlock(&g_pad_mutex);
+    SDL_GameControllerClose(controller);
+    return;
+  }
+  g_pad = controller;
+  pthread_mutex_unlock(&g_pad_mutex);
+  nx_exit_chord_log_controller(controller, 0);
+  if (g_exit_monitor_active)
+    otr_exit_monitor_reset_hold(&g_exit_monitor);
   if (e_padConnected) {
     e_padConnected(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE);
     debugPrintf("[input] nativeGamepadConnected(dev=%d tipo=%d)\n",
                 PAD_DEVICE_ID, PAD_TYPE);
   }
+  otr_gptk_set_primary_mask(primary_mask);
+  debugPrintf("[input] GPTK primary SDL mask=0x%08x\n", primary_mask);
 }
 
 static void send_touch(bool down, bool move) {
@@ -494,7 +692,70 @@ static void send_touch(bool down, bool move) {
   }
 }
 
+void offtheroad_input_digital_sink(const char *action, int pressed,
+                                   float value) {
+  (void)value;
+  if (strcmp(action, "otr.accelerate") == 0 ||
+      strcmp(action, "otr.confirm") == 0) {
+    pad_button(AK_BUTTON_A, pressed != 0);
+  } else if (strcmp(action, "otr.brake") == 0 ||
+             strcmp(action, "otr.back") == 0) {
+    pad_button(AK_BUTTON_B, pressed != 0);
+  } else if (strcmp(action, "otr.pause") == 0) {
+    pad_button(AK_BUTTON_START, pressed != 0);
+  } else if (strcmp(action, "cursor.click") == 0) {
+    g_cursor_pressed = pressed != 0;
+    send_touch(pressed != 0, false);
+  }
+}
+
+void offtheroad_input_vector_sink(const char *action, float x, float y) {
+  if (strcmp(action, "camera.steer") == 0) {
+    pad_axis(AX_X, x);
+    pad_axis(AX_Y, y);
+  } else if (strcmp(action, "camera.look") == 0) {
+    pad_axis(AX_Z, x);
+    pad_axis(AX_RZ, y);
+  } else if (strcmp(action, "cursor.move") == 0) {
+    g_cursor_x = x;
+    g_cursor_y = y;
+    send_touch(false, true);
+  }
+}
+
+static bool engine_gameplay_active(void) {
+  void *multi;
+  if (e_multiSingleton == NULL || e_multiGetLocalPlayer == NULL) return false;
+  multi = *e_multiSingleton;
+  return multi != NULL && e_multiGetLocalPlayer(multi) != NULL;
+}
+
+static void update_input_context(void) {
+  bool gameplay = engine_gameplay_active();
+  if (gameplay != g_gameplay_context) {
+    if (g_touch_down) send_touch(false, false);
+    g_cursor_pressed = false;
+    /* The right stick changes ownership at this boundary.  Explicitly clear
+     * the old camera values before the dispatcher changes context. */
+    pad_axis(AX_Z, 0.0f);
+    pad_axis(AX_RZ, 0.0f);
+    otr_gptk_set_gameplay(gameplay ? 1 : 0);
+    g_gameplay_context = gameplay;
+    debugPrintf("[input] contexto GPTK: %s (cMulti local-player=%s)\n",
+                otr_gptk_context_name(), gameplay ? "sim" : "nao");
+  }
+  g_cursor_visible = !gameplay;
+}
+
 static void pump_input(float dt) {
+  bool button_now[SDL_CONTROLLER_BUTTON_MAX];
+  Sint16 axis_left_x = 0;
+  Sint16 axis_left_y = 0;
+  Sint16 axis_right_x = 0;
+  Sint16 axis_right_y = 0;
+  Sint16 axis_trigger_left = 0;
+  Sint16 axis_trigger_right = 0;
+  int have_pad = 0;
   SDL_Event ev;
   while (SDL_PollEvent(&ev)) {
     switch (ev.type) {
@@ -504,93 +765,119 @@ static void pump_input(float dt) {
         break;
       case SDL_CONTROLLERDEVICEADDED: open_pad(ev.cdevice.which); break;
       case SDL_CONTROLLERDEVICEREMOVED:
-        if (g_pad) {
-          SDL_GameControllerClose(g_pad);
+        {
+          SDL_GameController *removed;
+          pthread_mutex_lock(&g_pad_mutex);
+          removed = g_pad;
           g_pad = NULL;
-          if (e_padDisconnected) e_padDisconnected(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE);
+          pthread_mutex_unlock(&g_pad_mutex);
+          if (removed != NULL) {
+            otr_exit_monitor_reset_hold(&g_exit_monitor);
+            otr_gptk_release_all();
+            SDL_GameControllerClose(removed);
+            if (e_padDisconnected)
+              e_padDisconnected(g_env, NULL, PAD_DEVICE_ID, PAD_TYPE);
+          }
         }
         break;
       default: break;
     }
   }
-  if (!g_pad) return;
-
-  /* SELECT+START = sair.  Lido por ESTADO, nunca por evento (regra #29). */
-  if (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_BACK) &&
-      SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_START)) {
-    trigger_exit("SELECT+START");
-    return;
+  pthread_mutex_lock(&g_pad_mutex);
+  if (g_pad != NULL) {
+    SDL_GameControllerUpdate();
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+      button_now[b] = SDL_GameControllerGetButton(
+                          g_pad, (SDL_GameControllerButton)b) != 0;
+    axis_left_x = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_LEFTX);
+    axis_left_y = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_LEFTY);
+    axis_right_x = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_RIGHTX);
+    axis_right_y = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_RIGHTY);
+    axis_trigger_left = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+    axis_trigger_right = SDL_GameControllerGetAxis(
+        g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    have_pad = 1;
   }
+  pthread_mutex_unlock(&g_pad_mutex);
+  if (!have_pad) return;
+
+  update_input_context();
 
   for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
-    bool now = SDL_GameControllerGetButton(g_pad, (SDL_GameControllerButton)b) != 0;
+    bool now = button_now[b];
+    int control;
+    int mapped;
+    int ak;
     if (now == g_btn_prev[b]) continue;
     g_btn_prev[b] = now;
-    int ak = sdl_btn_to_android(b);
-    if (ak) pad_button(ak, now);
+    control = sdl_btn_to_gptk(b);
+    mapped = control >= 0 && otr_gptk_button_mapped(control);
+    if (control >= 0) otr_gptk_feed_button(control, now ? 1 : 0, now ? 1.0f : 0.0f);
+    ak = sdl_btn_to_android(b);
+    if (!mapped && ak) pad_button(ak, now);
     /* o dpad tambem chega como eixo HAT nos jogos Android */
-    if (b == SDL_CONTROLLER_BUTTON_DPAD_LEFT || b == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
-      float hx = (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 1.0f : 0.0f) -
-                 (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 1.0f : 0.0f);
+    if (!mapped && (b == SDL_CONTROLLER_BUTTON_DPAD_LEFT ||
+                    b == SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) {
+      float hx = (button_now[SDL_CONTROLLER_BUTTON_DPAD_RIGHT] ? 1.0f : 0.0f) -
+                 (button_now[SDL_CONTROLLER_BUTTON_DPAD_LEFT] ? 1.0f : 0.0f);
       pad_axis(AX_HAT_X, hx);
     }
-    if (b == SDL_CONTROLLER_BUTTON_DPAD_UP || b == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
-      float hy = (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ? 1.0f : 0.0f) -
-                 (SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_DPAD_UP) ? 1.0f : 0.0f);
+    if (!mapped && (b == SDL_CONTROLLER_BUTTON_DPAD_UP ||
+                    b == SDL_CONTROLLER_BUTTON_DPAD_DOWN)) {
+      float hy = (button_now[SDL_CONTROLLER_BUTTON_DPAD_DOWN] ? 1.0f : 0.0f) -
+                 (button_now[SDL_CONTROLLER_BUTTON_DPAD_UP] ? 1.0f : 0.0f);
       pad_axis(AX_HAT_Y, hy);
     }
   }
 
-  float lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-  float ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
-  float rx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
-  float ry = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
-  float lt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32767.0f;
-  float rt = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.0f;
+  float lx = axis_left_x / 32767.0f;
+  float ly = axis_left_y / 32767.0f;
+  float rx = axis_right_x / 32767.0f;
+  float ry = axis_right_y / 32767.0f;
+  float lt = axis_trigger_left / 32767.0f;
+  float rt = axis_trigger_right / 32767.0f;
   const float dz = 0.16f;
   if (fabsf(lx) < dz) lx = 0.0f;
   if (fabsf(ly) < dz) ly = 0.0f;
   if (fabsf(rx) < dz) rx = 0.0f;
   if (fabsf(ry) < dz) ry = 0.0f;
 
-  /* modo ponteiro: L3 liga/desliga.  Fora do modo o stick direito e SO a
-   * camera do jogo e NENHUM cursor e desenhado (feedback do NextOS: os dois
-   * no mesmo stick conflitam).  Dentro do modo o stick direito move o
-   * ponteiro, R3 toca, e a camera nao recebe o stick. */
-  {
-    static bool l3_prev = false;
-    bool l3 = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0;
-    if (l3 && !l3_prev) {
-      g_cursor_mode = !g_cursor_mode;
-      debugPrintf("[input] modo ponteiro: %s\n", g_cursor_mode ? "ON" : "OFF");
-      if (!g_cursor_mode && g_touch_down) send_touch(false, false);
-    }
-    l3_prev = l3;
+  /* GPTK is the sole reader for each stick it owns in the live context. In
+   * cursor/menu only RIGHT_STICK is owned; once cMulti has a local player the
+   * same physical stick changes to camera.look. L3 never toggles a mode. */
+  otr_gptk_feed_stick(NXINPUT_GPTK_LEFT_STICK, lx, ly, dt);
+  otr_gptk_feed_stick(NXINPUT_GPTK_RIGHT_STICK, rx, ry, dt);
+  if (!otr_gptk_stick_owned(NXINPUT_GPTK_LEFT_STICK)) {
+    pad_axis(AX_X, lx);
+    pad_axis(AX_Y, ly);
   }
-  g_cursor_visible = g_cursor_mode;
-
-  pad_axis(AX_X, lx);
-  pad_axis(AX_Y, ly);
-  pad_axis(AX_Z, g_cursor_mode ? 0.0f : rx);
-  pad_axis(AX_RZ, g_cursor_mode ? 0.0f : ry);
-  pad_axis(AX_LTRIGGER, lt < 0.0f ? 0.0f : lt);
-  pad_axis(AX_RTRIGGER, rt < 0.0f ? 0.0f : rt);
-
-  if (g_cursor_mode) {
-    if (rx != 0.0f || ry != 0.0f) {
-      g_cursor_x += rx * 900.0f * dt;
-      g_cursor_y += ry * 900.0f * dt;
-      if (g_cursor_x < 0) g_cursor_x = 0;
-      if (g_cursor_y < 0) g_cursor_y = 0;
-      if (g_cursor_x > g_screen_w - 1) g_cursor_x = (float)g_screen_w - 1;
-      if (g_cursor_y > g_screen_h - 1) g_cursor_y = (float)g_screen_h - 1;
-      send_touch(false, true);
+  if (!otr_gptk_stick_owned(NXINPUT_GPTK_RIGHT_STICK)) {
+    pad_axis(AX_Z, rx);
+    pad_axis(AX_RZ, ry);
+  }
+  {
+    static bool lt_prev, rt_prev;
+    bool lt_now = lt > 0.5f;
+    bool rt_now = rt > 0.5f;
+    if (lt_now != lt_prev) {
+      otr_gptk_feed_button(NXINPUT_GPTK_L2, lt_now ? 1 : 0,
+                           lt_now ? lt : 0.0f);
+      lt_prev = lt_now;
     }
-    bool click = SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
-    if (click != g_cursor_pressed) {
-      g_cursor_pressed = click;
-      send_touch(click, false);
+    if (rt_now != rt_prev) {
+      otr_gptk_feed_button(NXINPUT_GPTK_R2, rt_now ? 1 : 0,
+                           rt_now ? rt : 0.0f);
+      rt_prev = rt_now;
     }
+    if (!otr_gptk_button_mapped(NXINPUT_GPTK_L2))
+      pad_axis(AX_LTRIGGER, lt < 0.0f ? 0.0f : lt);
+    if (!otr_gptk_button_mapped(NXINPUT_GPTK_R2))
+      pad_axis(AX_RTRIGGER, rt < 0.0f ? 0.0f : rt);
   }
 }
 
@@ -726,7 +1013,14 @@ int main(int argc, char *argv[]) {
                                        (const char *)r, (const char *)v);
   }
   /* o contexto TEM de estar corrente aqui: e dele que a engine se apropria
-   * (eglGetCurrentContext -> bgfx::setPlatformData) dentro de nativeInit. */
+   * (eglGetCurrentContext -> bgfx::setPlatformData) dentro de nativeInit.
+   * A barreira canônica roda ANTES até do shader do cursor: contexto GLES
+   * errado, drawable 1x1 persistente ou ESSL100 inválido jamais chega à
+   * engine. O ELF do jogo exporta bgfx::gles2::{rendererCreate,GlContext} e
+   * importa apenas o núcleo ES2; um provider que reporte GL ES 3.2 satisfaz o
+   * mínimo 2.0, mas não muda o dialecto exigido. */
+  if (!otr_graphics_contract_start(cwd))
+    fatal_error("graphics contract GLES>=2.0/ESSL100 rejeitado antes da engine");
   init_cursor_renderer();
 
   g_cursor_x = g_screen_w * 0.5f;
@@ -791,8 +1085,32 @@ int main(int argc, char *argv[]) {
               (void *)e_padConnected, (void *)e_padButtonDown,
               (void *)e_padButtonUp, (void *)e_padAxis);
 
+  e_multiSingleton =
+      (void **)so_find_addr_safe("_ZN10cSingletonI6cMultiE10mSingletonE");
+  e_multiGetLocalPlayer =
+      (void *)so_find_addr_safe("_ZN6cMulti14getLocalPlayerEv");
+  debugPrintf("[input] contexto real cMulti: singleton=%p getLocalPlayer=%p\n",
+              (void *)e_multiSingleton, (void *)e_multiGetLocalPlayer);
+
   if (!e_nativeInit || !e_nativeRender)
     fatal_error("nativeInit/nativeRender nao encontrados");
+  if (!e_padButtonDown || !e_padButtonUp || !e_padAxis ||
+      !e_multiSingleton || !e_multiGetLocalPlayer)
+    fatal_error("sinks/contexto nativos obrigatorios nao encontrados");
+
+  {
+    otr_gptk_hooks hooks;
+    char error[256];
+    hooks.digital = offtheroad_input_digital_sink;
+    hooks.vector = offtheroad_input_vector_sink;
+    if (otr_gptk_init(cwd, g_screen_w, g_screen_h, &hooks, error,
+                      sizeof(error)) != 0)
+      fatal_error("GPTK fail-closed: %s", error);
+    if (otr_input_load_evidence_path()[0] != '\0' &&
+        otr_gptk_write_load_receipt(otr_input_load_evidence_path()) != 0)
+      fatal_error("nao foi possivel publicar receipt do GPTK carregado");
+    debugPrintf("[input] GPTK owner/default -> parser -> dispatcher -> sinks: OK\n");
+  }
 
   if (e_JNI_OnLoad) {
     jint v = e_JNI_OnLoad(g_vm, NULL);
@@ -816,6 +1134,8 @@ int main(int argc, char *argv[]) {
 
   open_pad(0);
   for (int i = 0; i < SDL_NumJoysticks() && !g_pad; i++) open_pad(i);
+  if (exit_monitor_start_runtime() != 0)
+    fatal_error("host SELECT+START monitor unavailable");
 
   debugPrintf("=== entrando no laco de quadros ===\n");
   unsigned long frames = 0;
@@ -823,7 +1143,7 @@ int main(int argc, char *argv[]) {
   int fps_n = 0;
   uint32_t last = SDL_GetTicks();
 
-  while (g_running) {
+  while (atomic_load_explicit(&g_running, memory_order_acquire)) {
     uint32_t now0 = SDL_GetTicks();
     float dt = (now0 - last) / 1000.0f;
     if (dt <= 0.0f || dt > 0.25f) dt = 1.0f / 60.0f;
@@ -863,11 +1183,16 @@ int main(int argc, char *argv[]) {
     }
 
     opensles_shim_pump_callbacks();
+    if (opensles_shim_monitor_audio() != 0) {
+      trigger_exit("audio callback stalled and bounded reopen failed");
+      continue;
+    }
     e_nativeRender(g_env, NULL);
-    draw_cursor();
-    /* prova de imagem CONTINUA: medir ANTES do present (pos-swap o backbuffer
-     * e' indefinido em GPU tile-based e a leitura vira falso PRETO). */
+    /* Measure the NATIVE frame before the cursor overlay. Otherwise a white
+     * pointer could falsely turn an RGB=0 game into a healthy frame. */
+    (void)otr_graphics_pre_present(frames + 1ul, g_screen_w, g_screen_h);
     nxgl_frame_proof_before_present(g_screen_w, g_screen_h);
+    draw_cursor();
     SDL_GL_SwapWindow(g_window);
 
     frames++;
@@ -890,8 +1215,24 @@ int main(int argc, char *argv[]) {
   }
 
   debugPrintf("[main] salvando e encerrando\n");
+  exit_monitor_stop_runtime();
+  if (otr_exit_monitor_delivery_count(&g_exit_monitor) == 1u) {
+    otr_gptk_note_terminal_receipt(
+        otr_exit_monitor_source(&g_exit_monitor) ==
+                OTR_EXIT_SOURCE_SDL_PRIMARY
+            ? "sdl-primary"
+            : "evdev-fallback",
+        otr_exit_monitor_delivery_count(&g_exit_monitor),
+        otr_exit_monitor_poll_count(&g_exit_monitor), 1);
+  }
+  otr_gptk_release_all();
+  if (otr_input_evidence_path()[0] != '\0')
+    (void)otr_gptk_write_receipt(otr_input_evidence_path());
   if (e_nativeOnPause) e_nativeOnPause(g_env, NULL);
   if (e_nativeOnStop) e_nativeOnStop(g_env, NULL);
+  if (otr_audio_evidence_path()[0] != '\0')
+    (void)opensles_shim_write_receipt(otr_audio_evidence_path());
+  opensles_shim_safe_exit();
   debugPrintf("[main] encerrado (quadros=%lu)\n", frames);
   nxgl_frame_proof_publish();
   /* Mali-450: NUNCA SDL_GL_DeleteContext/DestroyWindow/SDL_Quit aqui -- o

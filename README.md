@@ -106,6 +106,12 @@ gameplay to a clean exit:
 |---|---|---|
 | Amlogic-old AArch64, NextOS (R36S-class) | Mali-450 (Utgard), OpenGL ES 2.0, 1280x720 | clean install (NXE0000), frame proof 100%, 30 fps, clean audio, exit 0 |
 
+That receipt was taken with the **1.0.1** ZIP. The current **1.0.3** release is
+the same port rebuilt on the newer NextOS runtime — new loader binary, newer
+installer, new generation store. Its host gates pass; its physical handheld run
+has not been repeated yet. If you want the build that carries the device
+receipt, take v1.0.1 from the releases page.
+
 Measured earlier on the same universal build line: about 31 fps in the open
 world and 60 fps in menus on the Mali-450 with roughly 167 MB resident, and
 about 79 fps at 640x480 on an RK3326 / Mali-G31 handheld at the default detail
@@ -141,12 +147,12 @@ Discord.
 
 ```sh
 ./build_universal.sh          # universal low-glibc AArch64 loader
-./package/build-package.sh    # gate + bundle the release ZIP
 ```
 
-The packaging script needs the pinned NextOS release tooling, named through
-`NEXTOS_FRAMEWORK_ROOT`; without it, it stops with a clear message. Building the
-loader itself only needs the toolchain and a sysroot with SDL2/EGL/GLES headers.
+Building the loader needs the pinned cross toolchain and a sysroot with
+SDL2/EGL/GLES headers; SDL2 and GLESv2 come from the device firmware and enter
+the link only as SONAME stubs. Gating and bundling the release ZIP is done by
+the pinned NextOS release tooling, which is not part of this repository.
 
 ## Licensing and credits
 
@@ -255,6 +261,12 @@ limpo:
 | Classe de aparelho | Vídeo | Resultado |
 |---|---|---|
 | Amlogic-old AArch64, NextOS (linha R36S) | Mali-450 (Utgard), OpenGL ES 2.0, 1280x720 | instalação limpa (NXE0000), frame proof 100%, 30 fps, áudio limpo, saída 0 |
+
+Esse receipt é do ZIP **1.0.1**. A release atual, **1.0.3**, é o mesmo port
+reconstruído sobre o runtime NextOS mais novo — binário do loader novo,
+instalador mais novo, nova máquina de gerações. Os gates de host passam; a
+corrida física no aparelho ainda não foi repetida. Quem quiser a build com o
+receipt de aparelho, pega a v1.0.1 na página de releases.
 
 Medido antes na mesma linha de build universal: cerca de 31 fps no mundo aberto
 e 60 fps em menu no Mali-450, com uns 167 MB residentes, e cerca de 79 fps a

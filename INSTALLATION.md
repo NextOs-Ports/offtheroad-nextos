@@ -19,10 +19,11 @@ Owner data for this port:
   `9e24980ff7fa31e741dc4f03806386bd09c47a60eb4c46b2b41f3403c97f5976`.
 
 The reference container hash identifies the tested copy; it is never the only
-compatibility condition. The extraction recipe also validates the package ID,
-the ABI, the structure and the critical internal payloads (`libgame.so`,
-`libc++_shared.so` and the `assets/` tree) by size and SHA-256. Do not publish
-the original container filename or any download source.
+compatibility condition. The extraction recipe validates the package ID, ABI,
+ELF machine, structural layout and bounded sizes of the critical internal
+payloads (`libgame.so`, `libc++_shared.so` and the `assets/` tree). It requires
+`data_001.xpk`; `AVConfig.json` is explicitly optional. Do not publish the
+original container filename or any download source.
 
 First run:
 
@@ -59,10 +60,11 @@ Dados do proprietário deste port:
   `9e24980ff7fa31e741dc4f03806386bd09c47a60eb4c46b2b41f3403c97f5976`.
 
 O hash integral identifica somente a cópia testada e nunca é a única condição
-de compatibilidade. A receita também valida o package ID, a ABI, a estrutura e
-os payloads internos críticos (`libgame.so`, `libc++_shared.so` e a árvore
-`assets/`) por tamanho e SHA-256. Não publique o nome original do container nem
-qualquer origem de download.
+de compatibilidade. A receita valida package ID, ABI, máquina ELF, estrutura e
+limites de tamanho dos payloads internos críticos (`libgame.so`,
+`libc++_shared.so` e a árvore `assets/`). `data_001.xpk` é obrigatório;
+`AVConfig.json` é explicitamente opcional. Não publique o nome original do
+container nem qualquer origem de download.
 
 Primeiro boot:
 

@@ -6,14 +6,19 @@
  */
 
 #include <SDL2/SDL.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "opensles_shim.h"
+#include "nxaudio_receipt.h"
+#include "otr_audio_recovery.h"
 #include "so_util.h"
 #include "util.h"
 
@@ -147,6 +152,21 @@ static int audio_log_on(void) {
 static pthread_mutex_t g_players_lock = PTHREAD_MUTEX_INITIALIZER;
 static SDL_AudioDeviceID g_audio_dev = 0;
 static int g_audio_initialized = 0;
+static SDL_AudioSpec g_audio_want;
+static SDL_AudioSpec g_audio_have;
+static nxaudio_liveness g_audio_liveness;
+static nxaudio_receipt g_audio_receipt;
+static otr_audio_recovery g_audio_recovery;
+static int g_audio_evidence_initialized;
+static int g_audio_recovery_failed;
+static int g_audio_recovery_logged;
+static uint64_t g_audio_recovery_deadline_ns;
+
+static uint64_t audio_now_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0u;
+  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
 
 static void queue_reset(AudioPlayer *p) {
   memset(p->queued_sizes, 0, sizeof(p->queued_sizes));
@@ -241,9 +261,15 @@ static uint32_t ring_read(AudioPlayer *p, void *data, uint32_t len) {
 #define SDL_OUTPUT_RATE 44100
 #define TMP_BUF_SAMPLES (SDL_AUDIO_SAMPLES * 2)
 
-static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
+/* Port-owned device callback.  It is deliberately exported so a physical
+ * receipt can bind the adapter's declared callback to this exact ELF. */
+void offtheroad_audio_device_callback(void *userdata, Uint8 *stream, int len) {
   (void)userdata;
   memset(stream, 0, len);
+  if (g_audio_evidence_initialized) {
+    (void)nxaudio_liveness_tick(&g_audio_liveness, audio_now_ns());
+    otr_audio_recovery_note_callback(&g_audio_recovery);
+  }
 
   int16_t *out = (int16_t *)stream;
   int out_samples = len / (int)sizeof(int16_t);
@@ -305,18 +331,23 @@ static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
     src_bytes_want = (src_bytes_want / frame_size) * frame_size;
 
     uint32_t got = ring_read(p, tmp, src_bytes_want);
+    int underrun;
     got = (got / frame_size) * frame_size;
     uint32_t src_frames_got = got / frame_size;
+    underrun = got < src_bytes_want;
+    if (underrun) {
+      p->underrun_count++;
+      if (g_audio_evidence_initialized)
+        (void)nxaudio_liveness_underrun(&g_audio_liveness);
+    }
     if (src_frames_got == 0) continue;
     queue_consume(p, got);
     p->played_bytes += got;
 
     /* Detect underrun: got less than requested = fade out last frames to avoid click */
-    int underrun = (got < src_bytes_want);
     uint32_t fade_out_len = 64;
     uint32_t fade_start = 0;
     if (underrun) {
-      p->underrun_count++;
       if (src_frames_got > fade_out_len) {
         fade_start = src_frames_got - fade_out_len;
       } else {
@@ -458,6 +489,18 @@ static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
     if (x < -32768.0f) x = -32768.0f;
     out[s] = (int16_t)x;
   }
+  if (g_audio_evidence_initialized) {
+    double peak = g_audio_receipt.peak_abs;
+    for (int s = 0; s < out_samples; s++) {
+      double value = fabs((double)out[s]) / 32768.0;
+      if (value > peak) peak = value;
+    }
+    g_audio_receipt.peak_abs = peak;
+    g_audio_receipt.callbacks_observed = g_audio_liveness.tick_count;
+    g_audio_receipt.bytes_delivered += (uint64_t)len;
+    g_audio_receipt.underrun_count =
+        nxaudio_liveness_underruns(&g_audio_liveness);
+  }
 
   /* Detect clicks: large jump between last sample of previous buffer
    * and first sample of this buffer */
@@ -512,6 +555,29 @@ static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
   }
 }
 
+static void audio_record_open(const SDL_AudioSpec *want,
+                              const SDL_AudioSpec *have) {
+  const char *backend = SDL_GetCurrentAudioDriver();
+  g_audio_want = *want;
+  g_audio_have = *have;
+  if (!g_audio_evidence_initialized) {
+    nxaudio_receipt_init(&g_audio_receipt);
+    otr_audio_recovery_init(&g_audio_recovery);
+    g_audio_receipt.requested_rate = (uint32_t)want->freq;
+    g_audio_receipt.requested_channels = (uint16_t)want->channels;
+    g_audio_receipt.requested_sample_format = NXAUDIO_SAMPLE_S16LE;
+    (void)snprintf(g_audio_receipt.api, sizeof(g_audio_receipt.api), "sdl2");
+    g_audio_evidence_initialized = 1;
+  }
+  (void)snprintf(g_audio_receipt.backend, sizeof(g_audio_receipt.backend),
+                 "%s", backend && *backend ? backend : "unknown");
+  g_audio_receipt.obtained_rate = (uint32_t)have->freq;
+  g_audio_receipt.obtained_channels = (uint16_t)have->channels;
+  g_audio_receipt.obtained_sample_format = NXAUDIO_SAMPLE_S16LE;
+  g_audio_receipt.callbacks_expected = 1u;
+  nxaudio_liveness_init(&g_audio_liveness, audio_now_ns());
+}
+
 /* Initialize SDL2 audio */
 static void ensure_audio_initialized(void) {
   if (g_audio_initialized) return;
@@ -530,7 +596,7 @@ static void ensure_audio_initialized(void) {
     if (s < 256 || s > SDL_AUDIO_SAMPLES) s = 1024;
     want.samples = (Uint16)s;
   }
-  want.callback = sdl_audio_callback;
+  want.callback = offtheroad_audio_device_callback;
   want.userdata = NULL;
 
   g_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
@@ -559,6 +625,7 @@ static void ensure_audio_initialized(void) {
 
   debugPrintf("opensles_shim: SDL audio opened: %dHz %dch %d samples\n",
               have.freq, have.channels, have.samples);
+  audio_record_open(&want, &have);
   SDL_PauseAudioDevice(g_audio_dev, 0);
   g_audio_initialized = 1;
   /* 🔊 PUMP THREAD: no Android real o OpenSLES chama os bq callbacks de uma
@@ -583,6 +650,151 @@ void *sl_pump_thread_fn(void *a) {
     usleep(4000);
   }
   return NULL;
+}
+
+static int audio_reopen_same_backend(void *user) {
+  SDL_AudioSpec have;
+  SDL_AudioDeviceID replacement;
+  (void)user;
+  if (g_audio_dev != 0) {
+    SDL_AudioDeviceID old = g_audio_dev;
+    g_audio_dev = 0;
+    SDL_CloseAudioDevice(old);
+  }
+  memset(&have, 0, sizeof(have));
+  replacement = SDL_OpenAudioDevice(NULL, 0, &g_audio_want, &have, 0);
+  if (replacement == 0) return -1;
+  g_audio_dev = replacement;
+  audio_record_open(&g_audio_want, &have);
+  otr_audio_recovery_arm_post_reopen(&g_audio_recovery);
+  SDL_PauseAudioDevice(g_audio_dev, 0);
+  return 0;
+}
+
+int opensles_shim_monitor_audio(void) {
+  int dead;
+  nxaudio_result recovery_result;
+  uint64_t now;
+  char recovery_line[OTR_AUDIO_RECOVERY_LINE_MAX];
+  if (g_audio_recovery_failed) return -1;
+  if (!g_audio_evidence_initialized || g_audio_dev == 0) return 0;
+  now = audio_now_ns();
+  if (otr_audio_recovery_attempt_count(&g_audio_recovery) != 0u &&
+      !otr_audio_recovery_callback_confirmed(&g_audio_recovery)) {
+    if (now <= g_audio_recovery_deadline_ns) return 0;
+    g_audio_recovery_failed = 1;
+    otr_audio_recovery_mark_callback_timeout(&g_audio_recovery);
+    if (otr_audio_recovery_format(&g_audio_recovery, recovery_line,
+                                  sizeof(recovery_line)) == 0)
+      debugPrintf("%s\n", recovery_line);
+    debugPrintf("AUDIO-RECOVERY-ERROR: replacement callback timeout\n");
+    return -1;
+  }
+  if (otr_audio_recovery_callback_confirmed(&g_audio_recovery) &&
+      !g_audio_recovery_logged) {
+    if (otr_audio_recovery_format(&g_audio_recovery, recovery_line,
+                                  sizeof(recovery_line)) == 0)
+      debugPrintf("%s\n", recovery_line);
+    g_audio_recovery_logged = 1;
+  }
+  SDL_LockAudioDevice(g_audio_dev);
+  dead = nxaudio_liveness_dead(&g_audio_liveness, now,
+                               UINT64_C(2000000000));
+  SDL_UnlockAudioDevice(g_audio_dev);
+  if (dead != 1) return 0;
+  recovery_result = otr_audio_recovery_run_callback_stalled(
+      &g_audio_recovery, audio_reopen_same_backend, NULL);
+  g_audio_recovery_deadline_ns = now + UINT64_C(2000000000);
+  if (recovery_result != NXAUDIO_OK ||
+      g_audio_recovery.backend.outcome != NXAUDIO_RECOVERY_REOPENED) {
+    if (otr_audio_recovery_format(&g_audio_recovery, recovery_line,
+                                  sizeof(recovery_line)) == 0)
+      debugPrintf("%s\n", recovery_line);
+    g_audio_recovery_failed = 1;
+    return -1;
+  }
+  return 0;
+}
+
+static int audio_write_all(int fd, const char *data, size_t size) {
+  size_t offset = 0u;
+  while (offset < size) {
+    ssize_t written = write(fd, data + offset, size - offset);
+    if (written < 0 && errno == EINTR) continue;
+    if (written <= 0) return -1;
+    offset += (size_t)written;
+  }
+  return 0;
+}
+
+int opensles_shim_write_receipt(const char *path) {
+  char line[NXAUDIO_RECEIPT_LINE_MAX];
+  char recovery_line[OTR_AUDIO_RECOVERY_LINE_MAX];
+  char temporary[1024];
+  int fd;
+  int n;
+  if (!g_audio_evidence_initialized || path == NULL ||
+      path[0] == '\0' || strlen(path) > sizeof(temporary) - 48u)
+    return -1;
+  if (g_audio_dev != 0) SDL_LockAudioDevice(g_audio_dev);
+  g_audio_receipt.callbacks_observed = g_audio_liveness.tick_count;
+  g_audio_receipt.underrun_count = nxaudio_liveness_underruns(&g_audio_liveness);
+  if (nxaudio_receipt_format(&g_audio_receipt, line, sizeof(line)) !=
+      NXAUDIO_OK) {
+    if (g_audio_dev != 0) SDL_UnlockAudioDevice(g_audio_dev);
+    return -1;
+  }
+  if (g_audio_dev != 0) SDL_UnlockAudioDevice(g_audio_dev);
+  if (otr_audio_recovery_format(&g_audio_recovery, recovery_line,
+                                sizeof(recovery_line)) != 0)
+    return -1;
+  n = snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", path,
+               (long)getpid());
+  if (n < 0 || (size_t)n >= sizeof(temporary)) return -1;
+  (void)unlink(temporary);
+  fd = open(temporary,
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) return -1;
+  if (fchmod(fd, 0600) != 0 ||
+      audio_write_all(fd, line, strlen(line)) != 0 ||
+      audio_write_all(fd, "\n", 1u) != 0 ||
+      audio_write_all(fd, recovery_line, strlen(recovery_line)) != 0 ||
+      audio_write_all(fd, "\n", 1u) != 0 || fsync(fd) != 0) {
+    (void)close(fd);
+    (void)unlink(temporary);
+    return -1;
+  }
+  if (close(fd) != 0 || rename(temporary, path) != 0) {
+    (void)unlink(temporary);
+    return -1;
+  }
+  debugPrintf("%s\n", line);
+  debugPrintf("%s\n", recovery_line);
+  return 0;
+}
+
+static int audio_exit_confirmed(void *user) {
+  SDL_AudioDeviceID device = *(SDL_AudioDeviceID *)user;
+  return SDL_GetAudioDeviceStatus(device) != SDL_AUDIO_PLAYING;
+}
+
+void opensles_shim_safe_exit(void) {
+  nxaudio_safe_exit state;
+  uint64_t now;
+  if (g_audio_dev == 0) return;
+  SDL_PauseAudioDevice(g_audio_dev, 1);
+  memset(&state, 0, sizeof(state));
+  state.api_version = NXAUDIO_RECEIPT_API_VERSION;
+  state.struct_size = sizeof(state);
+  now = audio_now_ns();
+  state.now_ns = now;
+  state.poll_interval_ns = UINT64_C(1000000);
+  (void)nxaudio_safe_exit_pump(&state, now + UINT64_C(250000000),
+                               audio_exit_confirmed, &g_audio_dev);
+  debugPrintf("AUDIO-EXIT: status=%s polls=%u\n",
+              state.status == NXAUDIO_SAFE_EXIT_CONFIRMED ? "confirmed"
+                                                          : "timeout",
+              state.polls);
 }
 
 /* Reset player metadata without touching the 4MB ring buffer.

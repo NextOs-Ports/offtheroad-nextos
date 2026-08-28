@@ -2,7 +2,7 @@
   "architecture": "aarch64",
   "argument_mode": "none",
   "enabled_quirks": [],
-  "executable": "offtheroad",
+  "executable": "offtheroad-nextos",
   "home_mode": "port",
   "id": "offtheroad",
   "language": {
@@ -14,7 +14,7 @@
   "launcher_name": "Off The Road.sh",
   "nxextract": {
     "mode": "yes",
-    "version": "1.2.20"
+    "version": "1.2.21"
   },
   "prepare_script": "",
   "private_library_paths": [],
@@ -31,7 +31,7 @@
     "audio.embedded-openal"
   ],
   "required_files": [
-    "offtheroad",
+    "offtheroad-nextos",
     "nxsplash-nextos",
     "lib/libgame.so",
     "lib/libc++_shared.so"

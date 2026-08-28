@@ -1,10 +1,12 @@
 {
   "audio": {
-    "callbacks": [],
-    "format": null
+    "callbacks": [
+      "offtheroad_audio_device_callback"
+    ],
+    "format": "s16le-stereo-runtime-rate"
   },
   "graphics": {
-    "adapter": "nxgl_graphics_contract_adapter",
+    "adapter": "nxgl-graphics-contract+pre-overlay-frame-proof+provider-namespaced-shader-cache",
     "adopt_single_channel": false,
     "api": "gles",
     "drawable_ready_timeout_ms": 8000,
@@ -25,101 +27,116 @@
         "id": "otr.accelerate",
         "kind": "button",
         "sinks": [
-          "offtheroad.input.accelerate"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
         "id": "otr.brake",
         "kind": "button",
         "sinks": [
-          "offtheroad.input.brake"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
         "id": "otr.confirm",
         "kind": "button",
         "sinks": [
-          "offtheroad.input.confirm"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
         "id": "otr.back",
         "kind": "button",
         "sinks": [
-          "offtheroad.input.back"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
         "id": "otr.pause",
         "kind": "button",
         "sinks": [
-          "offtheroad.input.pause"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
-        "id": "otr.steer",
-        "kind": "vector",
+        "id": "cursor.click",
+        "kind": "button",
         "sinks": [
-          "offtheroad.input.steer"
+          "offtheroad.input.digital-sink"
         ]
       },
       {
-        "id": "otr.camera",
+        "id": "camera.steer",
         "kind": "vector",
         "sinks": [
-          "offtheroad.input.camera"
+          "offtheroad.input.vector-sink"
+        ]
+      },
+      {
+        "id": "camera.look",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.vector-sink"
         ]
       },
       {
         "id": "cursor.move",
         "kind": "vector",
         "sinks": [
-          "offtheroad.input.cursor-move"
-        ]
-      },
-      {
-        "id": "cursor.recenter",
-        "kind": "button",
-        "sinks": [
-          "offtheroad.input.cursor-recenter"
-        ]
-      },
-      {
-        "id": "otr.click",
-        "kind": "button",
-        "sinks": [
-          "offtheroad.input.cursor-click"
+          "offtheroad.input.vector-sink"
         ]
       }
     ],
     "contexts": {
       "cursor": {
-        "A": "otr.click",
-        "R3": "cursor.recenter",
-        "RIGHT_STICK": "cursor.move"
+        "A": "otr.confirm",
+        "B": "otr.back",
+        "R3": "cursor.click",
+        "RIGHT_STICK": "cursor.move",
+        "START": "otr.pause"
       },
       "gameplay": {
         "A": "otr.accelerate",
         "B": "otr.brake",
-        "LEFT_STICK": "otr.steer",
-        "RIGHT_STICK": "otr.camera",
+        "LEFT_STICK": "camera.steer",
+        "RIGHT_STICK": "camera.look",
         "START": "otr.pause"
       },
       "menu": {
         "A": "otr.confirm",
         "B": "otr.back",
-        "LEFT_STICK": "otr.steer",
+        "R3": "cursor.click",
+        "RIGHT_STICK": "cursor.move",
         "START": "otr.pause"
       }
     },
-    "mapping": null,
-    "mapping_authority": "sdl-portmaster-complete-first",
-    "touch": null
+    "mapping": "NEXTOSCONTROLLERS.gptk",
+    "mapping_authority": "gptk-single-authority",
+    "touch": "nativeTouchesBegin/Move/End in cursor context only"
   },
   "jni": {
-    "callbacks": [],
-    "classes": [],
-    "methods": []
+    "callbacks": [
+      "JNI_OnLoad",
+      "Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeOnStart",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeOnResume",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeOnPause",
+      "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeOnStop"
+    ],
+    "classes": [
+      "org/cocos2dx/lib/Cocos2dxHelper",
+      "org/cocos2dx/lib/Cocos2dxRenderer",
+      "com/utils/GameControllerInput"
+    ],
+    "methods": [
+      "cocos2d::nativeGamepadConnected",
+      "cocos2d::nativeGamepadButtonDown",
+      "cocos2d::nativeGamepadButtonUp",
+      "cocos2d::nativeGamepadAxisValueChanged",
+      "cMulti::getLocalPlayer"
+    ]
   },
   "language_access": {
     "fallback": "en",
@@ -130,25 +147,68 @@
     ]
   },
   "lifecycle": {
-    "sequence": [],
-    "source_evidence": []
+    "sequence": [
+      "create and make current SDL GLES2 context",
+      "validate nxgl GLES2/ESSL100 contract and namespace disposable shader cache",
+      "load libc++_shared.so and run init_array",
+      "load libgame.so and run init_array",
+      "resolve required lifecycle/input/context symbols",
+      "load owner/default GPTK, parse, register and bind real sinks",
+      "JNI_OnLoad",
+      "Cocos2dxHelper.nativeSetApkPath",
+      "Cocos2dxRenderer.nativeOnStart",
+      "Cocos2dxRenderer.nativeInit",
+      "Cocos2dxRenderer.nativeOnResume",
+      "native input and Cocos2dxRenderer.nativeRender loop",
+      "pre-overlay native-frame proof and SDL_GL_SwapWindow",
+      "Cocos2dxRenderer.nativeOnPause",
+      "Cocos2dxRenderer.nativeOnStop",
+      "bounded audio shutdown",
+      "_exit(0) without Mali teardown"
+    ],
+    "source_evidence": [
+      "src/main.c",
+      "src/otr_audio_recovery.c",
+      "src/otr_exit_monitor.c",
+      "src/otr_gptk.c",
+      "src/otr_runtime_evidence.c",
+      "src/opensles_shim.c",
+      "references/graphics-contract-static-v1.json"
+    ]
   },
   "persistence": {
-    "callbacks": [],
-    "paths": []
+    "callbacks": [
+      "Cocos2dxRenderer.nativeOnPause",
+      "Cocos2dxRenderer.nativeOnStop"
+    ],
+    "paths": [
+      "userdata",
+      "NEXTOSCONTROLLERS.gptk",
+      "NEXTOSSETTINGS.txt"
+    ]
   },
   "prohibitions": [
-    "do not invent lifecycle order",
-    "do not promote offsets or callbacks to defaults",
-    "do not invent save or terminal behavior"
+    "never apply a universal alpha fix when native RGB is also zero",
+    "never resolve cMulti or game callbacks by binary offsets",
+    "never delete or relocate saves and owner configuration while rotating shader cache",
+    "never deliver a GPTK-owned control through the parallel raw path",
+    "never use L3 as a cursor-mode toggle"
   ],
-  "quirks": [],
-  "release_ready": false,
+  "quirks": [
+    "bgfx sh_* cache is disposable and namespaced by measured graphics-provider identity",
+    "native game RGB is sampled before the cursor overlay can affect frame proof",
+    "Mali-450 exits after native pause/stop without destructive GL teardown"
+  ],
+  "release_ready": true,
   "schema": "nxadapter-skeleton-v1",
   "schema_version": 1,
-  "status": "unimplemented_nonrelease",
+  "status": "implemented_release",
   "terminal": {
-    "action": null,
-    "evidence": []
+    "action": "SELECT+START",
+    "evidence": [
+      "src/otr_exit_monitor.c: host watcher delivers a sticky request exactly once without entering the guest/render loop",
+      "src/main.c: SDL mapping is primary; canonical evdev fallback is polled only without complete BACK/START binds",
+      "src/main.c: native pause/stop, evidence, audio shutdown and terminal deadline"
+    ]
   }
 }

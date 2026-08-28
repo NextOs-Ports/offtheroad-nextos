@@ -59,4 +59,10 @@ SLresult slCreateEngine_shim(void **pEngine, SLuint32 numOptions,
 
 void opensles_shim_pump_callbacks(void);
 
+/* V3 audio evidence/recovery. Monitoring runs on the game thread; recovery is
+ * bounded to one same-backend SDL reopen and never runs inside the callback. */
+int opensles_shim_monitor_audio(void);
+int opensles_shim_write_receipt(const char *path);
+void opensles_shim_safe_exit(void);
+
 #endif

@@ -34,7 +34,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-NXEXTRACT_VERSION = "1.2.20"
+NXEXTRACT_VERSION = "1.2.21"
+# Markers are runtime receipts, not engine executables. 1.2.21 can migrate the
+# immediately preceding marker after authenticating the already installed
+# payload; older layouts still fail closed and use the normal install path.
+COMPATIBLE_MARKER_VERSIONS = (NXEXTRACT_VERSION, "1.2.20")
 FORMAT_VERSION = 1
 TRANSACTION_FORMAT_VERSION = 2
 TERMINAL_RESULT_SCHEMA = "org.nextos.nxextract.terminal-result"
@@ -4289,6 +4293,155 @@ def payload_metadata_seal(root, commit_paths, mutable_paths=()):
     return digest.hexdigest(), object_count
 
 
+def payload_content_seal(root, commit_paths, mutable_paths=()):
+    """Stable, strong seal for recovering from filesystem metadata drift.
+
+    FAT/exFAT/FUSE can rewrite or quantize mtimes without changing one payload
+    byte. The cheap metadata seal remains the ordinary per-launch gate; this
+    content seal is calculated only when publishing/migrating a marker or when
+    that cheap gate changes. Paths, object kinds, sizes and bytes are covered,
+    while recipe-declared mutable paths remain excluded exactly as they are
+    from the metadata seal.
+    """
+    digest = hashlib.sha256(b"NXEXTRACT-PAYLOAD-CONTENT-v1\0")
+    object_count = 0
+    content_bytes = 0
+    portable_objects = {}
+    mutable_keys = tuple(portable_path_key(item) for item in mutable_paths)
+
+    def is_mutable(key):
+        return any(key == mk or key.startswith(mk + "/") for mk in mutable_keys)
+
+    def add_directory(relative):
+        nonlocal object_count
+        key = portable_path_key(relative)
+        if is_mutable(key):
+            return
+        previous = portable_objects.get(key)
+        if previous is not None and previous != relative:
+            raise ValidationError(
+                "payload content seal found a non-portable path collision: %s / %s"
+                % (previous, relative)
+            )
+        portable_objects[key] = relative
+        encoded = relative.replace(os.sep, "/").encode("utf-8")
+        digest.update(b"D")
+        digest.update(struct.pack("<I", len(encoded)))
+        digest.update(encoded)
+        object_count += 1
+
+    def add_file(relative, path):
+        nonlocal object_count, content_bytes
+        key = portable_path_key(relative)
+        if is_mutable(key):
+            return
+        previous = portable_objects.get(key)
+        if previous is not None and previous != relative:
+            raise ValidationError(
+                "payload content seal found a non-portable path collision: %s / %s"
+                % (previous, relative)
+            )
+        portable_objects[key] = relative
+        before = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValidationError(
+                "payload content seal refuses linked or non-regular file: %s"
+                % relative
+            )
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            identity = (before.st_dev, before.st_ino, before.st_size)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino, opened.st_size) != identity
+            ):
+                raise ValidationError(
+                    "payload content seal file identity changed before read: %s"
+                    % relative
+                )
+            encoded = relative.replace(os.sep, "/").encode("utf-8")
+            digest.update(b"F")
+            digest.update(struct.pack("<I", len(encoded)))
+            digest.update(encoded)
+            digest.update(struct.pack("<Q", opened.st_size))
+            while True:
+                block = os.read(descriptor, CHUNK_SIZE)
+                if not block:
+                    break
+                digest.update(block)
+            after = os.fstat(descriptor)
+            before_mtime = getattr(
+                opened, "st_mtime_ns", int(opened.st_mtime * 1_000_000_000)
+            )
+            after_mtime = getattr(
+                after, "st_mtime_ns", int(after.st_mtime * 1_000_000_000)
+            )
+            if (
+                (after.st_dev, after.st_ino, after.st_size) != identity
+                or after_mtime != before_mtime
+            ):
+                raise ValidationError(
+                    "payload content changed while it was being authenticated: %s"
+                    % relative
+                )
+        finally:
+            os.close(descriptor)
+        final = os.stat(path, follow_symlinks=False)
+        if (final.st_dev, final.st_ino, final.st_size) != identity:
+            raise ValidationError(
+                "payload content seal path changed after read: %s" % relative
+            )
+        object_count += 1
+        content_bytes += before.st_size
+
+    for commit in sorted(commit_paths, key=portable_path_key):
+        ensure_no_symlink_parents(root, commit)
+        path = safe_join(root, commit, "payload content seal")
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as error:
+            raise ValidationError(
+                "payload content seal cannot stat %s: %s" % (commit, error)
+            )
+        if stat.S_ISLNK(mode):
+            raise ValidationError(
+                "payload content seal refuses symbolic link: %s" % commit
+            )
+        if stat.S_ISREG(mode):
+            add_file(commit, path)
+            continue
+        if not stat.S_ISDIR(mode):
+            raise ValidationError(
+                "payload content seal refuses special object: %s" % commit
+            )
+        add_directory(commit)
+        for current, directories, files in os.walk(
+            path, topdown=True, followlinks=False
+        ):
+            directories.sort(key=portable_path_key)
+            files.sort(key=portable_path_key)
+            for name in directories:
+                child = os.path.join(current, name)
+                if os.path.islink(child):
+                    raise ValidationError(
+                        "payload content seal refuses symbolic link: %s" % child
+                    )
+                relative = os.path.relpath(child, root).replace(os.sep, "/")
+                add_directory(relative)
+            for name in files:
+                child = os.path.join(current, name)
+                relative = os.path.relpath(child, root).replace(os.sep, "/")
+                add_file(relative, child)
+    return digest.hexdigest(), object_count, content_bytes
+
+
 def marker_payload_seal_valid(marker, game_dir, mutable_paths=()):
     try:
         actual_seal, actual_count = payload_metadata_seal(
@@ -5537,10 +5690,9 @@ def recover_transaction(recipe, game_dir, workspace, marker_path, logger):
                     marker=marker,
                     full=True,
                 )
-                if not marker_payload_seal_valid(marker, game_dir, recipe.mutable_paths):
-                    raise ValidationError(
-                        "published marker payload metadata seal mismatch"
-                    )
+                _authenticate_and_reseal_marker(
+                    marker_path, marker, recipe, game_dir, logger
+                )
             except (OSError, NXError) as error:
                 logger.log(
                     "published marker payload failed recovery validation: %s" % error
@@ -5561,6 +5713,11 @@ def _write_install_marker(marker_path, recipe, plan, transaction_id, game_dir):
     payload_seal, payload_objects = payload_metadata_seal(
         game_dir, plan.commit_paths, recipe.mutable_paths
     )
+    payload_content, content_objects, payload_content_bytes = payload_content_seal(
+        game_dir, plan.commit_paths, recipe.mutable_paths
+    )
+    if content_objects != payload_objects:
+        raise ValidationError("payload seal object count changed during publication")
     marker = {
         "format": FORMAT_VERSION,
         "nxextract_version": NXEXTRACT_VERSION,
@@ -5580,6 +5737,8 @@ def _write_install_marker(marker_path, recipe, plan, transaction_id, game_dir):
         "commit": list(plan.commit_paths),
         "payload_seal": payload_seal,
         "payload_objects": payload_objects,
+        "payload_content_seal": payload_content,
+        "payload_content_bytes": payload_content_bytes,
         "items": [
             {"rule": item.rule_id, "destination": item.destination, "size": item.size}
             for item in plan.items
@@ -6203,11 +6362,12 @@ def marker_matches_recipe(marker, recipe):
         expected_commit = _expand_commit_paths(recipe, abi)
     except RecipeError:
         return False
+    marker_version = marker.get("nxextract_version")
     source_kind = marker.get("source_kind")
     package_id = marker.get("package_id")
     if (
         marker.get("format") != FORMAT_VERSION
-        or marker.get("nxextract_version") != NXEXTRACT_VERSION
+        or marker_version not in COMPATIBLE_MARKER_VERSIONS
         or marker.get("recipe_id") != recipe.identifier
         or marker.get("recipe_version") != recipe.version
         or marker.get("recipe_digest") != recipe.digest
@@ -6237,6 +6397,14 @@ def marker_matches_recipe(marker, recipe):
                 or any(ord(character) < 32 for character in package_id)
             )
         )
+    ):
+        return False
+    if marker_version == NXEXTRACT_VERSION and (
+        not isinstance(marker.get("payload_content_seal"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", marker["payload_content_seal"]) is None
+        or not isinstance(marker.get("payload_content_bytes"), int)
+        or isinstance(marker.get("payload_content_bytes"), bool)
+        or marker.get("payload_content_bytes") < 0
     ):
         return False
     compatibility = marker.get("compatibility")
@@ -6279,7 +6447,86 @@ def marker_matches_recipe(marker, recipe):
     return True
 
 
-def marker_fast_valid(marker_path, recipe, game_dir, logger):
+def _authenticate_and_reseal_marker(
+    marker_path,
+    marker,
+    recipe,
+    game_dir,
+    logger,
+    expected_content_seal=None,
+):
+    actual_metadata, actual_objects = payload_metadata_seal(
+        game_dir, marker["commit"], recipe.mutable_paths
+    )
+    metadata_matches = (
+        actual_metadata == marker.get("payload_seal")
+        and actual_objects == marker.get("payload_objects")
+    )
+    current = marker.get("nxextract_version") == NXEXTRACT_VERSION
+    if metadata_matches and current:
+        return marker
+
+    # A legacy marker has no stable content root. Re-authenticate it through
+    # the recipe's full declared validation before creating one. This is the
+    # same trust boundary used by the existing-data adoption path, but keeps
+    # the already installed bytes in place and never starts the setup UI.
+    if not current:
+        if not metadata_matches and expected_content_seal is None:
+            raise ValidationError(
+                "legacy marker metadata drift requires an expected content seal"
+            )
+        validate_recipe_outputs(
+            game_dir,
+            recipe,
+            marker["abi"],
+            marker=marker,
+            full=True,
+        )
+
+    content_seal, content_objects, content_bytes = payload_content_seal(
+        game_dir, marker["commit"], recipe.mutable_paths
+    )
+    if content_objects != actual_objects:
+        raise ValidationError("payload seal object count changed during validation")
+    if expected_content_seal is not None and content_seal != expected_content_seal:
+        raise ValidationError("payload content seal differs from expected seal")
+    if current and (
+        content_seal != marker.get("payload_content_seal")
+        or content_bytes != marker.get("payload_content_bytes")
+    ):
+        raise ValidationError("payload content seal mismatch")
+
+    migrated = dict(marker)
+    previous_version = migrated.get("nxextract_version")
+    migrated["nxextract_version"] = NXEXTRACT_VERSION
+    migrated["payload_seal"] = actual_metadata
+    migrated["payload_objects"] = actual_objects
+    migrated["payload_content_seal"] = content_seal
+    migrated["payload_content_bytes"] = content_bytes
+    migrated["metadata_resealed"] = int(time.time())
+    if previous_version != NXEXTRACT_VERSION:
+        migrated["marker_migrated_from"] = previous_version
+        logger.log(
+            "marker migration %s -> %s: full recipe validation and content "
+            "seal accepted; no extraction"
+            % (previous_version, NXEXTRACT_VERSION)
+        )
+    else:
+        logger.log(
+            "payload metadata drift authenticated by stable content seal; "
+            "marker resealed without extraction"
+        )
+    atomic_write_json(marker_path, migrated, required_directory_sync=True)
+    return migrated
+
+
+def marker_fast_valid(
+    marker_path,
+    recipe,
+    game_dir,
+    logger,
+    expected_content_seal=None,
+):
     marker = _load_marker(marker_path)
     if not marker_matches_recipe(marker, recipe):
         return None
@@ -6294,13 +6541,21 @@ def marker_fast_valid(marker_path, recipe, game_dir, logger):
     except (OSError, NXError) as error:
         logger.miss("marker-validation", "existing marker rejected: %s" % error)
         return None
-    if not marker_payload_seal_valid(marker, game_dir, recipe.mutable_paths):
+    try:
+        return _authenticate_and_reseal_marker(
+            marker_path,
+            marker,
+            recipe,
+            game_dir,
+            logger,
+            expected_content_seal=expected_content_seal,
+        )
+    except (OSError, NXError) as error:
         logger.miss(
             "marker-validation",
-            "existing marker rejected: payload metadata seal mismatch",
+            "existing marker rejected: %s" % error,
         )
         return None
-    return marker
 
 
 def try_adopt_existing(recipe, game_dir, marker_path, logger, progress, abi_override):
@@ -6479,7 +6734,31 @@ def install_command(args):
                     recipe.version,
                 )
             )
-            recover_transaction(recipe, game_dir, workspace, marker_path, logger)
+            if args.reuse_only:
+                if args.force_source:
+                    raise RecipeError(
+                        "--reuse-only cannot be combined with --force-source"
+                    )
+                # This mode is a deliberately conservative binary-update
+                # preflight. Recovery can rename a staged payload or roll a
+                # prior transaction back, so never run it implicitly here.
+                # A pending journal must be handled by a normal, explicitly
+                # authorized install invocation instead.
+                transaction_path = _journal_path(workspace)
+                if os.path.lexists(transaction_path):
+                    raise ValidationError(
+                        "reuse-only refused: a pending payload transaction "
+                        "requires recovery; no recovery, setup UI or extraction "
+                        "was started"
+                    )
+            else:
+                if args.expected_content_seal is not None:
+                    raise RecipeError(
+                        "--expected-content-seal requires --reuse-only"
+                    )
+                recover_transaction(
+                    recipe, game_dir, workspace, marker_path, logger
+                )
             if args.force_source:
                 logger.log(
                     "force-source requested; bypassing the installed marker "
@@ -6487,7 +6766,11 @@ def install_command(args):
                 )
             else:
                 selected_marker = marker_fast_valid(
-                    marker_path, recipe, game_dir, logger
+                    marker_path,
+                    recipe,
+                    game_dir,
+                    logger,
+                    expected_content_seal=args.expected_content_seal,
                 )
                 if selected_marker is not None:
                     progress.done("GAME DATA ALREADY READY")
@@ -6498,6 +6781,11 @@ def install_command(args):
                     logger.terminal("TERMINAL SUCCESS NXE0001: validated marker")
                     finish("success", "NXE0001")
                     return 0
+            if args.reuse_only:
+                raise ValidationError(
+                    "reuse-only refused: installed payload could not be "
+                    "authenticated; setup UI and extraction were not started"
+                )
             ui.start()
             progress.set_guard(ui.assert_visible)
             progress.update(
@@ -6769,11 +7057,48 @@ def verify_command(args):
     validate_recipe_outputs(
         game_dir, recipe, marker["abi"], marker=marker, full=True
     )
-    if not marker_payload_seal_valid(marker, game_dir, recipe.mutable_paths):
-        raise ValidationError("installation payload metadata seal mismatch")
+    logger = Logger(None, verbose=False)
+    try:
+        marker = _authenticate_and_reseal_marker(
+            marker_path,
+            marker,
+            recipe,
+            game_dir,
+            logger,
+            expected_content_seal=args.expected_content_seal,
+        )
+    finally:
+        logger.close()
     print(
         "OK: %s version %s, ABI %s"
         % (recipe.title, recipe.version, marker["abi"])
+    )
+    return 0
+
+
+def content_seal_command(args):
+    """Print a read-only stable seal for an already installed payload."""
+    game_dir = resolve_real_directory(args.game_dir, "game directory")
+    recipe = recipe_for_game(args.recipe, game_dir)
+    marker_path = safe_join(game_dir, recipe.marker, "marker")
+    marker = _load_marker(marker_path)
+    if not marker_matches_recipe(marker, recipe):
+        raise ValidationError("matching installation marker was not found")
+    validate_recipe_outputs(
+        game_dir, recipe, marker["abi"], marker=marker, full=True
+    )
+    seal, objects, content_bytes = payload_content_seal(
+        game_dir, marker["commit"], recipe.mutable_paths
+    )
+    print(
+        json.dumps(
+            {
+                "content_bytes": content_bytes,
+                "objects": objects,
+                "payload_content_seal": seal,
+            },
+            sort_keys=True,
+        )
     )
     return 0
 
@@ -6801,6 +7126,15 @@ def progress_command(args):
         force=True,
     )
     return 0
+
+
+def expected_content_seal_argument(value):
+    normalized = value.lower()
+    if re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
+        raise argparse.ArgumentTypeError(
+            "expected content seal must be exactly 64 hexadecimal characters"
+        )
+    return normalized
 
 
 def build_parser():
@@ -6858,6 +7192,22 @@ def build_parser():
             "current payload is valid"
         ),
     )
+    install.add_argument(
+        "--reuse-only",
+        action="store_true",
+        help=(
+            "authenticate/migrate already installed data or fail before the "
+            "setup UI, source scan and extraction"
+        ),
+    )
+    install.add_argument(
+        "--expected-content-seal",
+        type=expected_content_seal_argument,
+        help=(
+            "expected stable payload seal for a metadata-drifted legacy "
+            "marker; valid only with --reuse-only"
+        ),
+    )
     install.set_defaults(handler=install_command)
 
     plan = subparsers.add_parser("plan", help="resolve sources without extracting payload")
@@ -6873,7 +7223,17 @@ def build_parser():
     verify = subparsers.add_parser("verify", help="fully verify an installed payload")
     verify.add_argument("--recipe", required=True)
     verify.add_argument("--game-dir", required=True)
+    verify.add_argument(
+        "--expected-content-seal", type=expected_content_seal_argument
+    )
     verify.set_defaults(handler=verify_command)
+
+    content_seal = subparsers.add_parser(
+        "content-seal", help="read and print the stable seal of installed data"
+    )
+    content_seal.add_argument("--recipe", required=True)
+    content_seal.add_argument("--game-dir", required=True)
+    content_seal.set_defaults(handler=content_seal_command)
 
     recipe_check = subparsers.add_parser("recipe-check", help="validate a recipe")
     recipe_check.add_argument("--recipe", required=True)

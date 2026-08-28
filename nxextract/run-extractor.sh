@@ -21,8 +21,29 @@ if [ "${NXEXTRACT_RUNTIME_ENV_ACTIVE:-0}" != 1 ]; then
   exec bash "$RUNTIME_HELPER" bash "$SCRIPT_DIR/run-extractor.sh" "$@"
 fi
 
+reuse_args=()
+case "${NXEXTRACT_REUSE_ONLY:-0}" in
+  0|'') ;;
+  1) reuse_args=(--reuse-only) ;;
+  *)
+    printf 'NXExtract: NXEXTRACT_REUSE_ONLY must be 0 or 1\n' >&2
+    exit 64
+    ;;
+esac
+
+seal_args=()
+if [[ -n ${NXEXTRACT_EXPECT_CONTENT_SEAL:-} ]]; then
+  if [[ ! ${NXEXTRACT_EXPECT_CONTENT_SEAL} =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf 'NXExtract: NXEXTRACT_EXPECT_CONTENT_SEAL must be 64 hexadecimal characters\n' >&2
+    exit 64
+  fi
+  seal_args=(--expected-content-seal "${NXEXTRACT_EXPECT_CONTENT_SEAL,,}")
+fi
+
 exec "$PYTHON_BIN" "$SCRIPT_DIR/nxextract.py" install \
   --recipe "$RECIPE" \
   --game-dir "$GAME_DIR" \
   --require-ui \
+  "${reuse_args[@]}" \
+  "${seal_args[@]}" \
   "$@"
