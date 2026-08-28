@@ -1,0 +1,178 @@
+{
+  "adapter": {
+    "skeleton": "contract-only"
+  },
+  "documentation": {
+    "proven_support": [],
+    "status": "scaffold"
+  },
+  "license": {
+    "source": "LICENSE",
+    "spdx_id": "GPL-3.0-only"
+  },
+  "nxextract_recipe": "extractor.json",
+  "nxport": {
+    "architecture": "aarch64",
+    "argument_mode": "none",
+    "enabled_quirks": [],
+    "executable": "offtheroad",
+    "home_mode": "port",
+    "id": "offtheroad",
+    "language": {
+      "default": "en",
+      "supported": [
+        "en"
+      ]
+    },
+    "launcher_name": "Off The Road.sh",
+    "nxextract": {
+      "mode": "yes",
+      "version": "1.2.20"
+    },
+    "prepare_script": "",
+    "private_library_paths": [],
+    "required_capabilities": [
+      "host.portmaster",
+      "graphics.window",
+      "graphics.gles2",
+      "graphics.egl",
+      "graphics.egl-config",
+      "graphics.drawable",
+      "audio.output-open",
+      "input.controller-mapping",
+      "input.controller-api",
+      "audio.embedded-openal"
+    ],
+    "required_files": [
+      "offtheroad",
+      "nxsplash-nextos",
+      "lib/libgame.so",
+      "lib/libc++_shared.so"
+    ],
+    "runtime_report": "log",
+    "schema_version": 2,
+    "title": "Off The Road"
+  },
+  "portmaster": {
+    "metadata_version": 4,
+    "min_glibc": "2.27",
+    "runtime": []
+  },
+  "schema_version": 3,
+  "language_access": {
+    "mode": "native-menu",
+    "supported": [
+      "en"
+    ],
+    "fallback": "en",
+    "sinks": []
+  },
+  "graphics": {
+    "uses_gl": true,
+    "api": "gles",
+    "profile": "es",
+    "version": "2.0",
+    "version_policy": "minimum",
+    "shader_dialect": "essl100",
+    "drawable_ready_timeout_ms": 8000,
+    "adopt_single_channel": false,
+    "required_devices": [
+      "mali-450",
+      "mali-g31"
+    ]
+  },
+  "controls": {
+    "actions": [
+      {
+        "id": "otr.accelerate",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.accelerate"
+        ]
+      },
+      {
+        "id": "otr.brake",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.brake"
+        ]
+      },
+      {
+        "id": "otr.confirm",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.confirm"
+        ]
+      },
+      {
+        "id": "otr.back",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.back"
+        ]
+      },
+      {
+        "id": "otr.pause",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.pause"
+        ]
+      },
+      {
+        "id": "otr.steer",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.steer"
+        ]
+      },
+      {
+        "id": "otr.camera",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.camera"
+        ]
+      },
+      {
+        "id": "cursor.move",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.cursor-move"
+        ]
+      },
+      {
+        "id": "cursor.recenter",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.cursor-recenter"
+        ]
+      },
+      {
+        "id": "otr.click",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.cursor-click"
+        ]
+      }
+    ],
+    "contexts": {
+      "menu": {
+        "A": "otr.confirm",
+        "B": "otr.back",
+        "START": "otr.pause",
+        "LEFT_STICK": "otr.steer"
+      },
+      "gameplay": {
+        "A": "otr.accelerate",
+        "B": "otr.brake",
+        "START": "otr.pause",
+        "LEFT_STICK": "otr.steer",
+        "RIGHT_STICK": "otr.camera"
+      },
+      "cursor": {
+        "A": "otr.click",
+        "RIGHT_STICK": "cursor.move",
+        "R3": "cursor.recenter"
+      }
+    }
+  }
+}

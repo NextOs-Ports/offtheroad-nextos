@@ -1,0 +1,31 @@
+# NEXTOSCONTROLLERS — controles do NextOS / NextOS controls
+# Formato próprio do NextOS. NÃO é gptokeyb: nunca vira teclado.
+# NextOS own format. NOT gptokeyb: never becomes a keyboard.
+#
+# Edite as ações à direita para trocar os controles. A lista de ações
+# válidas vem do adapter-contract.json do port. Este arquivo é SEU:
+# atualizações do port nunca sobrescrevem a sua cópia editada.
+# Edit the actions on the right to remap. Valid actions come from the
+# port's adapter-contract.json. This file is YOURS: port updates never
+# overwrite your edited copy.
+
+format = NEXTOS_CONTROLLERS/1
+port = offtheroad
+
+[menu]
+A = otr.confirm
+B = otr.back
+START = otr.pause
+LEFT_STICK = otr.steer
+
+[gameplay]
+A = otr.accelerate
+B = otr.brake
+START = otr.pause
+LEFT_STICK = otr.steer
+RIGHT_STICK = otr.camera
+
+[cursor]
+A = otr.click
+R3 = cursor.recenter
+RIGHT_STICK = cursor.move

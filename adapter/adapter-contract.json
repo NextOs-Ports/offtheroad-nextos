@@ -1,0 +1,154 @@
+{
+  "audio": {
+    "callbacks": [],
+    "format": null
+  },
+  "graphics": {
+    "adapter": "nxgl_graphics_contract_adapter",
+    "adopt_single_channel": false,
+    "api": "gles",
+    "drawable_ready_timeout_ms": 8000,
+    "profile": "es",
+    "required_devices": [
+      "mali-450",
+      "mali-g31"
+    ],
+    "shader_dialect": "essl100",
+    "uses_gl": true,
+    "version": "2.0",
+    "version_policy": "minimum"
+  },
+  "imports": [],
+  "input": {
+    "actions": [
+      {
+        "id": "otr.accelerate",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.accelerate"
+        ]
+      },
+      {
+        "id": "otr.brake",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.brake"
+        ]
+      },
+      {
+        "id": "otr.confirm",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.confirm"
+        ]
+      },
+      {
+        "id": "otr.back",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.back"
+        ]
+      },
+      {
+        "id": "otr.pause",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.pause"
+        ]
+      },
+      {
+        "id": "otr.steer",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.steer"
+        ]
+      },
+      {
+        "id": "otr.camera",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.camera"
+        ]
+      },
+      {
+        "id": "cursor.move",
+        "kind": "vector",
+        "sinks": [
+          "offtheroad.input.cursor-move"
+        ]
+      },
+      {
+        "id": "cursor.recenter",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.cursor-recenter"
+        ]
+      },
+      {
+        "id": "otr.click",
+        "kind": "button",
+        "sinks": [
+          "offtheroad.input.cursor-click"
+        ]
+      }
+    ],
+    "contexts": {
+      "cursor": {
+        "A": "otr.click",
+        "R3": "cursor.recenter",
+        "RIGHT_STICK": "cursor.move"
+      },
+      "gameplay": {
+        "A": "otr.accelerate",
+        "B": "otr.brake",
+        "LEFT_STICK": "otr.steer",
+        "RIGHT_STICK": "otr.camera",
+        "START": "otr.pause"
+      },
+      "menu": {
+        "A": "otr.confirm",
+        "B": "otr.back",
+        "LEFT_STICK": "otr.steer",
+        "START": "otr.pause"
+      }
+    },
+    "mapping": null,
+    "mapping_authority": "sdl-portmaster-complete-first",
+    "touch": null
+  },
+  "jni": {
+    "callbacks": [],
+    "classes": [],
+    "methods": []
+  },
+  "language_access": {
+    "fallback": "en",
+    "mode": "native-menu",
+    "sinks": [],
+    "supported": [
+      "en"
+    ]
+  },
+  "lifecycle": {
+    "sequence": [],
+    "source_evidence": []
+  },
+  "persistence": {
+    "callbacks": [],
+    "paths": []
+  },
+  "prohibitions": [
+    "do not invent lifecycle order",
+    "do not promote offsets or callbacks to defaults",
+    "do not invent save or terminal behavior"
+  ],
+  "quirks": [],
+  "release_ready": false,
+  "schema": "nxadapter-skeleton-v1",
+  "schema_version": 1,
+  "status": "unimplemented_nonrelease",
+  "terminal": {
+    "action": null,
+    "evidence": []
+  }
+}
