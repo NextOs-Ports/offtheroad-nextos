@@ -20,10 +20,14 @@ Owner data for this port:
 
 The reference container hash identifies the tested copy; it is never the only
 compatibility condition. The extraction recipe validates the package ID, ABI,
-ELF machine, structural layout and bounded sizes of the critical internal
-payloads (`libgame.so`, `libc++_shared.so` and the `assets/` tree). It requires
-`data_001.xpk`; `AVConfig.json` is explicitly optional. Do not publish the
-original container filename or any download source.
+structural layout, and the exact size/SHA-256 of the internal runtime payloads
+`libgame.so` (9,501,104 bytes,
+`5258d644cbb023b137719901fa84acf8a8ae3da01c573b52a7a31255245628dd`) and
+`libc++_shared.so` (1,292,904 bytes,
+`4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4`).
+This accepts a renamed or re-signed/repackaged container carrying the same
+compatible runtime. `data_001.xpk` is required; `AVConfig.json` is optional.
+Do not publish the original container filename or any download source.
 
 First run:
 
@@ -60,11 +64,15 @@ Dados do proprietário deste port:
   `9e24980ff7fa31e741dc4f03806386bd09c47a60eb4c46b2b41f3403c97f5976`.
 
 O hash integral identifica somente a cópia testada e nunca é a única condição
-de compatibilidade. A receita valida package ID, ABI, máquina ELF, estrutura e
-limites de tamanho dos payloads internos críticos (`libgame.so`,
-`libc++_shared.so` e a árvore `assets/`). `data_001.xpk` é obrigatório;
-`AVConfig.json` é explicitamente opcional. Não publique o nome original do
-container nem qualquer origem de download.
+de compatibilidade. A receita valida package ID, ABI, estrutura e tamanho/hash
+SHA-256 exatos dos payloads internos `libgame.so` (9.501.104 bytes,
+`5258d644cbb023b137719901fa84acf8a8ae3da01c573b52a7a31255245628dd`) e
+`libc++_shared.so` (1.292.904 bytes,
+`4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4`).
+Isso aceita container renomeado ou reassinado/reempacotado que carregue o
+mesmo runtime compatível. `data_001.xpk` é obrigatório; `AVConfig.json` é
+opcional. Não publique o nome original do container nem qualquer origem de
+download.
 
 Primeiro boot:
 

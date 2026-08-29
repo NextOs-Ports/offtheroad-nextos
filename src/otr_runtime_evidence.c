@@ -114,7 +114,7 @@ static int bridge_launcher_identity(void) {
       !bind_identity("NX_PORT_ID", port_id))
     return 0;
   if (!bind_identity("NX_PORT_ID", "offtheroad") ||
-      !bind_identity("NX_PORT_VERSION", "1.0.3"))
+      !bind_identity("NX_PORT_VERSION", "1.0.4"))
     return 0;
   return 1;
 }
@@ -217,7 +217,7 @@ static int generation_safe(const char *value) {
   return 1;
 }
 
-/* Implements the nxbootstrap 0.6.36 health contract.  It intentionally does
+/* Implements the nxbootstrap 0.6.37 health contract.  It intentionally does
  * nothing outside a supervised generation launch. */
 static int publish_health(void) {
   const char *path = getenv("NXBOOTSTRAP_HEALTH_FILE");

@@ -388,6 +388,7 @@ int so_relocate(void) {
 
 int so_resolve(DynLibFunction *funcs, int num_funcs,
                int taint_missing_imports) {
+  int unresolved = 0;
   for (int i = 0; i < elf_hdr->e_shnum; i++) {
     char *sh_name = shstrtab + sec_hdr[i].sh_name;
     if (strcmp(sh_name, ".rela.dyn") == 0 ||
@@ -421,6 +422,7 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
             if (resolved) {
               *ptr = resolved + rels[j].r_addend;
             } else {
+              ++unresolved;
               if (taint_missing_imports)
                 *ptr = rels[j].r_offset;
               fprintf(stderr,
@@ -436,7 +438,7 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
       }
     }
   }
-  return 0;
+  return unresolved == 0 ? 0 : -unresolved;
 }
 
 void so_execute_init_array(void) {

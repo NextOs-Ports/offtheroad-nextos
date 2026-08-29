@@ -4,6 +4,7 @@
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 
@@ -28,8 +29,19 @@ static = json.loads(
         encoding="utf-8"
     )
 )
+egl_contract = json.loads(
+    (PORT / "references/egl-import-contract-v1.json").read_text(
+        encoding="utf-8"
+    )
+)
 recipe = json.loads((PORT / "extractor.json").read_text(encoding="utf-8"))
 main = (PORT / "src/main.c").read_text(encoding="utf-8")
+imports = (PORT / "src/imports.c").read_text(encoding="utf-8")
+egl_imports = (PORT / "src/otr_egl_imports.c").read_text(encoding="utf-8")
+so_util = (PORT / "src/so_util.c").read_text(encoding="utf-8")
+undefined_symbols = (PORT / "src/und_symbols.txt").read_text(
+    encoding="utf-8"
+)
 gptk = (PORT / "src/otr_gptk.c").read_text(encoding="utf-8")
 audio = (PORT / "src/opensles_shim.c").read_text(encoding="utf-8")
 audio_recovery = (PORT / "src/otr_audio_recovery.c").read_text(
@@ -145,10 +157,24 @@ roles = {
 }
 require(roles.get("assets/AVConfig.json") == "optional",
         "AVConfig.json regressed to a required payload")
+extract_by_id = {item["id"]: item for item in recipe["extract"]}
+game_validation = extract_by_id["engine-libgame-arm64"]["validate"]
+cxx_validation = extract_by_id["android-libcpp-shared-arm64"]["validate"]
+require(recipe["version"] == "1.18.2-arm64-4" and
+        game_validation.get("size") == 9501104 and
+        game_validation.get("sha256") ==
+        "5258d644cbb023b137719901fa84acf8a8ae3da01c573b52a7a31255245628dd" and
+        cxx_validation.get("size") == 1292904 and
+        cxx_validation.get("sha256") ==
+        "4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4",
+        "critical internal runtime payload identity is not fail-closed")
+require("egl-import-contract-v1" in
+        recipe["compatibility"]["required_symbols_or_interfaces"][0],
+        "recipe no longer binds compatibility to the measured EGL ABI")
 require(project["nxport"]["nxextract"]["version"] == "1.2.21" and
         release["nxextract"]["version"] == "1.2.21",
         "NXExtract 1.2.21 is not pinned consistently")
-require(version == "1.0.3" and release["package"]["version"] == version,
+require(version == "1.0.4" and release["package"]["version"] == version,
         "port version bump is not explicit and consistent")
 
 contract_call = main.index("otr_graphics_contract_start(cwd)")
@@ -213,6 +239,46 @@ require(static["contract"] == {
     "version": "2.0",
     "version_policy": "minimum",
 }, "static game evidence and declared GLES contract diverge")
+
+expected_egl_imports = {
+    "eglChooseConfig", "eglCreateContext", "eglCreateWindowSurface",
+    "eglDestroyContext", "eglDestroySurface", "eglGetConfigAttrib",
+    "eglGetCurrentContext", "eglGetDisplay", "eglGetProcAddress",
+    "eglInitialize", "eglMakeCurrent", "eglQueryString", "eglSwapBuffers",
+    "eglSwapInterval", "eglTerminate",
+}
+require(egl_contract["schema"] == "offtheroad-egl-import-contract-v1" and
+        set(egl_contract["guest_imports"]) == expected_egl_imports and
+        set(egl_contract["provider_imports"]) ==
+        expected_egl_imports - {"eglGetProcAddress"},
+        "measured guest EGL import contract is incomplete")
+provider_names = set(re.findall(r'^\s*"(egl[A-Za-z0-9_]+)",?$',
+                                egl_imports, re.MULTILINE))
+require(provider_names == expected_egl_imports - {"eglGetProcAddress"} and
+        '{"eglGetProcAddress", (uintptr_t)&my_eglGetProcAddress}' in imports,
+        "runtime EGL table does not cover the exact measured guest imports")
+documented_egl_imports = {
+    line.split("@", 1)[0] for line in undefined_symbols.splitlines()
+    if line.startswith("egl")
+}
+require(documented_egl_imports == expected_egl_imports,
+        "undefined-symbol inventory omitted measured EGL imports")
+require(main.index("if (prepare_guest_egl_imports() != 0)") <
+        main.index("load_module(CXX_SO") and
+        "otr_egl_provider_open_and_promote" in main and
+        "RTLD_NOW | RTLD_LOCAL" in egl_imports and
+        "RTLD_NOW | RTLD_GLOBAL" in egl_imports and
+        egl_imports.index("RTLD_NOW | RTLD_LOCAL") <
+        egl_imports.index("RTLD_NOW | RTLD_GLOBAL") and
+        '"libEGL.so.1", "libEGL.so"' in main and
+        "SDL_GL_GetProcAddress(\"eglGetCurrentContext\")" in main and
+        "dladdr(sdl_current_context_symbol" in main and
+        "g_egl_imports.functions" in main and
+        "current_context=1" in main,
+        "EGL provider proof/table no longer precedes guest loading")
+require('fatal_error("so_resolve(%s) deixou imports sem resolver"' in main and
+        "return unresolved == 0 ? 0 : -unresolved;" in so_util,
+        "guest import resolution is no longer fail-closed")
 
 require({name: value["version"] for name, value in
          framework_pin["components"].items()} == {

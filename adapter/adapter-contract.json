@@ -6,21 +6,38 @@
     "format": "s16le-stereo-runtime-rate"
   },
   "graphics": {
-    "adapter": "nxgl-graphics-contract+pre-overlay-frame-proof+provider-namespaced-shader-cache",
+    "adapter": "nxgl-graphics-contract+explicit-egl-import-table+pre-overlay-frame-proof+provider-namespaced-shader-cache",
     "adopt_single_channel": false,
     "api": "gles",
     "drawable_ready_timeout_ms": 8000,
     "profile": "es",
     "required_devices": [
       "mali-450",
-      "mali-g31"
+      "mali-g31",
+      "mali-g52"
     ],
     "shader_dialect": "essl100",
     "uses_gl": true,
     "version": "2.0",
     "version_policy": "minimum"
   },
-  "imports": [],
+  "imports": [
+    "eglChooseConfig",
+    "eglCreateContext",
+    "eglCreateWindowSurface",
+    "eglDestroyContext",
+    "eglDestroySurface",
+    "eglGetConfigAttrib",
+    "eglGetCurrentContext",
+    "eglGetDisplay",
+    "eglGetProcAddress",
+    "eglInitialize",
+    "eglMakeCurrent",
+    "eglQueryString",
+    "eglSwapBuffers",
+    "eglSwapInterval",
+    "eglTerminate"
+  ],
   "input": {
     "actions": [
       {
@@ -150,6 +167,7 @@
     "sequence": [
       "create and make current SDL GLES2 context",
       "validate nxgl GLES2/ESSL100 contract and namespace disposable shader cache",
+      "prove the SDL EGL provider and register all guest EGL imports explicitly",
       "load libc++_shared.so and run init_array",
       "load libgame.so and run init_array",
       "resolve required lifecycle/input/context symbols",
@@ -168,11 +186,13 @@
     ],
     "source_evidence": [
       "src/main.c",
+      "src/otr_egl_imports.c",
       "src/otr_audio_recovery.c",
       "src/otr_exit_monitor.c",
       "src/otr_gptk.c",
       "src/otr_runtime_evidence.c",
       "src/opensles_shim.c",
+      "references/egl-import-contract-v1.json",
       "references/graphics-contract-static-v1.json"
     ]
   },
@@ -189,12 +209,15 @@
   },
   "prohibitions": [
     "never apply a universal alpha fix when native RGB is also zero",
+    "never leave guest EGL JUMP_SLOT resolution to accidental RTLD_DEFAULT visibility",
+    "never promote an EGL candidate globally before its 14-symbol table and current context are validated locally",
     "never resolve cMulti or game callbacks by binary offsets",
     "never delete or relocate saves and owner configuration while rotating shader cache",
     "never deliver a GPTK-owned control through the parallel raw path",
     "never use L3 as a cursor-mode toggle"
   ],
   "quirks": [
+    "split GLVND EGL loaded RTLD_LOCAL is validated first, then reopened globally and bound through an explicit guest table",
     "bgfx sh_* cache is disposable and namespaced by measured graphics-provider identity",
     "native game RGB is sampled before the cursor overlay can affect frame proof",
     "Mali-450 exits after native pause/stop without destructive GL teardown"

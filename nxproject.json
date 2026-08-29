@@ -115,7 +115,8 @@
     "profile": "es",
     "required_devices": [
       "mali-450",
-      "mali-g31"
+      "mali-g31",
+      "mali-g52"
     ],
     "shader_dialect": "essl100",
     "uses_gl": true,
@@ -145,13 +146,13 @@
         "mode": "0755",
         "path": "offtheroad-nextos",
         "role": "executable",
-        "sha256": "7e9130d7dd05c4c43c80eb049c5c7b8d90ec19e3bdc2b6c96784796ad2107f3d"
+        "sha256": "deef645c549c8ffa0edbedcf27dfed2dceecd6d4a7167478882b2579f943a450"
       },
       {
         "mode": "0644",
         "path": "extractor.json",
         "role": "nxextract-recipe",
-        "sha256": "d609c65e8bc3c1359ce2ee69856b3aef72034e32e02d803ebcb0c54e7e3aa0fb"
+        "sha256": "a654cc1dc8468bcadf825909581f625ecc3f0a9e842c12bc44ee62e7d53264e4"
       },
       {
         "mode": "0644",
@@ -235,7 +236,7 @@
       "kind": "payload",
       "mode": "0644",
       "path": "INSTALLATION.md",
-      "sha256": "8f38616e1047324e4415496717201746e070dd7bbaf8681277deddba24e3f7fc"
+      "sha256": "a497b8baaf61fffc6512c5102d6945683075d481cdab213b7593a52658b0550e"
     },
     {
       "kind": "license-notice",
@@ -247,7 +248,7 @@
       "kind": "payload",
       "mode": "0644",
       "path": "README.md",
-      "sha256": "97ff50622f32d7a2009afa78293231eaa1c96c5f1ff0e038321e89078dbeb0c9"
+      "sha256": "95b4dd905ff64ba40e699f1261aabe07fed8750831dd9b24be8e2309eeef4fc2"
     },
     {
       "kind": "payload",
@@ -277,7 +278,7 @@
       "kind": "payload",
       "mode": "0644",
       "path": "version.txt",
-      "sha256": "f5e5c9534532840fcd45bb002e69ed85c61dba2753450e26b448b7df1481e24d"
+      "sha256": "d1b77b88f4b9f675a900e4143ac768a21218623cfe1703ca43162388c3271bd6"
     }
   ],
   "portmaster": {

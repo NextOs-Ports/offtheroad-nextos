@@ -29,6 +29,8 @@ void so_flush_caches(void);
 void so_free_temp(void);
 int so_load(const char *filename, void *base, size_t max_size);
 int so_relocate(void);
+/* Returns 0 only when every undefined relocation was resolved; otherwise the
+ * negative unresolved count lets callers stop before any init_array runs. */
 int so_resolve(DynLibFunction *funcs, int num_funcs, int taint_missing_imports);
 void so_execute_init_array(void);
 uintptr_t so_find_addr(const char *symbol);

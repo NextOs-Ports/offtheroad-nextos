@@ -11,9 +11,13 @@
 # que gravam o SONAME certo, nunca as libs do sysroot NextOS. O sysroot
 # NextOS entra somente-leitura e so' por HEADERS.
 #
-# EGL NAO vira DT_NEEDED: o unico ponto EGL da engine e' eglGetProcAddress,
-# servido por my_eglGetProcAddress -> SDL_GL_GetProcAddress (imports.c). O
-# egl_shim.c da linhagem bully e' codigo morto e fica fora deste build.
+# EGL NAO vira DT_NEEDED. eglGetProcAddress segue por SDL_GL_GetProcAddress;
+# os outros 14 imports do guest sao ligados explicitamente, em runtime, ao
+# provider que observa o contexto SDL corrente. Em GLVND/ROCKNIX o adapter
+# promove a libEGL ja carregada de RTLD_LOCAL para RTLD_GLOBAL via dlopen,
+# seguindo o padrao comprovado por Merchant/Horizon Chase. O egl_shim.c antigo da
+# linhagem bully continua fora: ele criaria outro contexto e quebraria a
+# adocao nativa feita pelo bgfx.
 #
 # Uso no host:  ./build_universal.sh
 # Public-final: nxrelease define NX_PUBLIC_FINAL_OUTPUT_DIR; o build monta esse
@@ -298,6 +302,7 @@ stub_lib GLESv2   libGLESv2.so.2   '^gl[A-Z]'
 DEFINED_SYMBOLS=$($NM -D --defined-only "$OUTPUT" | awk '{print $NF}')
 for symbol in \
   otr_graphics_contract_start \
+  otr_egl_import_table_build \
   nxgl_graphics_contract_validate \
   nxgl_graphics_contract_adapter_shader_probe \
   nxgl_graphics_contract_evidence_receipt \

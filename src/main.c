@@ -48,6 +48,7 @@
 #include "imports.h"
 #include "jni_shim.h"
 #include "opensles_shim.h"
+#include "otr_egl_imports.h"
 #include "otr_exit_monitor.h"
 #include "otr_gptk.h"
 #include "otr_runtime_evidence.h"
@@ -102,6 +103,8 @@ static void *g_env = NULL;
 static void *g_vm = NULL;
 static SDL_Window *g_window = NULL;
 static SDL_GLContext g_gl_ctx = NULL;
+static void *g_egl_provider_handle = NULL;
+static otr_egl_import_table g_egl_imports;
 static SDL_GameController *g_pad = NULL;
 static pthread_mutex_t g_pad_mutex = PTHREAD_MUTEX_INITIALIZER;
 static otr_exit_monitor g_exit_monitor;
@@ -373,7 +376,8 @@ static DynLibFunction *load_module(const char *name, int heap_mb,
   debugPrintf("[loader] carregando %s (heap %p, %d MB)\n", name, heap, heap_mb);
   if (so_load(name, heap, hs) < 0) fatal_error("so_load(%s) falhou", name);
   if (so_relocate() < 0) fatal_error("so_relocate(%s) falhou", name);
-  so_resolve(tbl, n, 0);
+  if (so_resolve(tbl, n, 0) < 0)
+    fatal_error("so_resolve(%s) deixou imports sem resolver", name);
   so_finalize();
   so_flush_caches();
   so_execute_init_array();
@@ -390,6 +394,90 @@ static DynLibFunction *tbl_concat(DynLibFunction *a, int an, DynLibFunction *b,
   memcpy(c + an, b, sizeof(DynLibFunction) * (size_t)bn);
   *out_n = an + bn;
   return c;
+}
+
+/* SDL deliberately owns window/context creation. On GLVND systems such as
+ * ROCKNIX, SDL can load libEGL with RTLD_LOCAL: its context works, while the
+ * Android guest's ELF imports remain invisible to dlsym(RTLD_DEFAULT). Build
+ * an explicit import table from the provider that can see the already-current
+ * context. The RTLD_GLOBAL reopen is the proven Merchant/Horizon promotion
+ * pattern and does not add a DT_NEEDED libEGL to the universal executable. */
+static int prepare_guest_egl_imports(void) {
+  static const char *const fallbacks[] = {"libEGL.so.1", "libEGL.so"};
+  const char *candidates[4];
+  size_t candidate_count = 0u;
+  void *sdl_current_context_symbol;
+  void *global_current_context_symbol;
+  Dl_info sdl_provider_info;
+  Dl_info global_provider_info;
+  char error[192];
+  char last_error[192] = "no compatible EGL provider";
+
+  /* Prefer the exact provider already selected by SDL/nxgl. dladdr avoids
+   * guessing libmali versus GLVND. RTLD_DEFAULT is used only to discover a
+   * second concrete provider path, never as a mixed-symbol import table. The
+   * SONAME fallbacks preserve systems whose resolvers do not expose EGL core. */
+  memset(&sdl_provider_info, 0, sizeof(sdl_provider_info));
+  sdl_current_context_symbol = SDL_GL_GetProcAddress("eglGetCurrentContext");
+  if (sdl_current_context_symbol != NULL &&
+      dladdr(sdl_current_context_symbol, &sdl_provider_info) != 0 &&
+      sdl_provider_info.dli_fname != NULL &&
+      sdl_provider_info.dli_fname[0] != '\0') {
+    candidates[candidate_count++] = sdl_provider_info.dli_fname;
+    debugPrintf("[egl] SDL current-context provider=%s\n",
+                sdl_provider_info.dli_fname);
+  }
+  memset(&global_provider_info, 0, sizeof(global_provider_info));
+  global_current_context_symbol = dlsym(RTLD_DEFAULT, "eglGetCurrentContext");
+  if (global_current_context_symbol != NULL &&
+      dladdr(global_current_context_symbol, &global_provider_info) != 0 &&
+      global_provider_info.dli_fname != NULL &&
+      global_provider_info.dli_fname[0] != '\0') {
+    bool duplicate = false;
+    for (size_t i = 0u; i < candidate_count; ++i) {
+      if (strcmp(candidates[i], global_provider_info.dli_fname) == 0) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate)
+      candidates[candidate_count++] = global_provider_info.dli_fname;
+  }
+  for (size_t i = 0u; i < sizeof(fallbacks) / sizeof(fallbacks[0]); ++i) {
+    bool duplicate = false;
+    for (size_t j = 0u; j < candidate_count; ++j) {
+      if (strcmp(candidates[j], fallbacks[i]) == 0) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) candidates[candidate_count++] = fallbacks[i];
+  }
+
+  for (size_t i = 0u; i < candidate_count; ++i) {
+    const char *candidate = candidates[i];
+    void *promoted_handle = NULL;
+
+    if (otr_egl_provider_open_and_promote(
+            &g_egl_imports, candidate, &promoted_handle,
+            error, sizeof(error)) == 0) {
+      g_egl_provider_handle = promoted_handle;
+      debugPrintf("EGL-IMPORT-EVIDENCE: source=%s visibility=promoted-global "
+                  "provider_imports=%zu guest_imports=%u current_context=1 "
+                  "get_proc_address=sdl verdict=PASS\n",
+                  candidate, g_egl_imports.count,
+                  OTR_EGL_GUEST_IMPORT_COUNT);
+      return 0;
+    }
+    SDL_strlcpy(last_error, error, sizeof(last_error));
+    debugPrintf("[egl] provider %s rejected: %s\n", candidate, error);
+  }
+
+  debugPrintf("EGL-IMPORT-EVIDENCE: source=none visibility=unavailable "
+              "provider_imports=0 guest_imports=%u current_context=0 "
+              "get_proc_address=sdl verdict=FAIL reason=%s\n",
+              OTR_EGL_GUEST_IMPORT_COUNT, last_error);
+  return -1;
 }
 
 /* --------------------------------------------------------------- cursor --- */
@@ -1021,6 +1109,8 @@ int main(int argc, char *argv[]) {
    * mínimo 2.0, mas não muda o dialecto exigido. */
   if (!otr_graphics_contract_start(cwd))
     fatal_error("graphics contract GLES>=2.0/ESSL100 rejeitado antes da engine");
+  if (prepare_guest_egl_imports() != 0)
+    fatal_error("imports EGL do contexto SDL nao puderam ser provados");
   init_cursor_renderer();
 
   g_cursor_x = g_screen_w * 0.5f;
@@ -1031,15 +1121,18 @@ int main(int argc, char *argv[]) {
   /* libc++_shared.so PRIMEIRO: libgame.so referencia ~180 simbolos do
    * namespace std::__ndk1 que so existem la (a glibc/libstdc++ do device tem
    * outro ABI e nao serve). */
+  int base_n = 0;
+  DynLibFunction *base = tbl_concat(
+      dynlib_functions, dynlib_functions_count, g_egl_imports.functions,
+      (int)g_egl_imports.count, &base_n);
   int cxx_n = 0;
-  DynLibFunction *cxx = load_module(CXX_SO, CXX_MEM_MB, dynlib_functions,
-                                    dynlib_functions_count, &cxx_n);
+  DynLibFunction *cxx = load_module(CXX_SO, CXX_MEM_MB, base, base_n, &cxx_n);
   debugPrintf("[loader] libc++_shared exporta %d simbolos\n", cxx_n);
 
-  DynLibFunction *tbl = dynlib_functions;
-  int tbl_n = dynlib_functions_count;
+  DynLibFunction *tbl = base;
+  int tbl_n = base_n;
   if (cxx && cxx_n > 0)
-    tbl = tbl_concat(dynlib_functions, dynlib_functions_count, cxx, cxx_n, &tbl_n);
+    tbl = tbl_concat(base, base_n, cxx, cxx_n, &tbl_n);
 
   load_module(GAME_SO, GAME_MEM_MB, tbl, tbl_n, NULL);
 

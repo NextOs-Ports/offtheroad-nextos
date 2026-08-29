@@ -1,9 +1,11 @@
-build/
+offtheroad
+offtheroad-nextos
 .build/
-*.o
-*.zip
-*.sha256
+log.txt
+debug.log
+assets/
+lib/
+userdata/
 gamedata/*
 !gamedata/README.txt
-log.txt
-nxextract.log
+*.apk

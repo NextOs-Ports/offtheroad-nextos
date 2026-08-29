@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "id": "offtheroad-nextos",
-  "version": "1.18.2-arm64-3",
+  "version": "1.18.2-arm64-4",
   "title": "OFF THE ROAD",
   "abi_order": [
     "arm64-v8a"
@@ -24,7 +24,7 @@
   "extract": [
     {
       "id": "engine-libgame-arm64",
-      "comment": "Sem sha256/tamanho exato de proposito: builds diferentes da mesma 1.18.2 (Play split, APK solto, regional) variam byte a byte. O contrato e' estrutural: ELF da ABI certa dentro da faixa.",
+      "comment": "O adapter depende do ABI/import set medido deste payload interno. O hash e o tamanho autenticam libgame.so, nao o container APK; assinatura, nome e reempacotamento do container continuam irrelevantes.",
       "source": {
         "kind": "entry",
         "patterns": [
@@ -35,12 +35,13 @@
       "validate": {
         "type": "file",
         "elf_machine": "{abi}",
-        "min_size": 4000000,
-        "max_size": 64000000
+        "size": 9501104,
+        "sha256": "5258d644cbb023b137719901fa84acf8a8ae3da01c573b52a7a31255245628dd"
       }
     },
     {
       "id": "android-libcpp-shared-arm64",
+      "comment": "Runtime C++ Android autenticado separadamente do container para preservar o namespace std::__ndk1 usado pelo guest medido.",
       "source": {
         "kind": "entry",
         "patterns": [
@@ -51,8 +52,8 @@
       "validate": {
         "type": "file",
         "elf_machine": "{abi}",
-        "min_size": 400000,
-        "max_size": 8000000
+        "size": 1292904,
+        "sha256": "4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4"
       }
     },
     {
@@ -83,15 +84,15 @@
       "path": "lib/libgame.so",
       "type": "file",
       "elf_machine": "{abi}",
-      "min_size": 4000000,
-      "max_size": 64000000
+      "size": 9501104,
+      "sha256": "5258d644cbb023b137719901fa84acf8a8ae3da01c573b52a7a31255245628dd"
     },
     {
       "path": "lib/libc++_shared.so",
       "type": "file",
       "elf_machine": "{abi}",
-      "min_size": 400000,
-      "max_size": 8000000
+      "size": 1292904,
+      "sha256": "4397241b4bd20a8e579bfb41d21107857e12985f6a01ca0c2a5f83380d1270b4"
     },
     {
       "path": "assets/data_001.xpk",
@@ -109,6 +110,12 @@
     "lib",
     "assets"
   ],
+  "reference_build": {
+    "game_version": "1.18.2",
+    "container_size": 563848921,
+    "container_sha256": "9e24980ff7fa31e741dc4f03806386bd09c47a60eb4c46b2b41f3403c97f5976",
+    "note": "Documentation only; compatibility is decided by package, ABI, structure and authenticated internal runtime payloads."
+  },
   "compatibility": {
     "package_families": [
       "com.dogbytegames.offtheroad"
@@ -135,6 +142,15 @@
         "member": "assets/AVConfig.json",
         "role": "optional"
       }
+    ],
+    "payload_contracts": [
+      "libgame.so is the measured ELF64 AArch64 xGen/bgfx runtime consumed by the adapter",
+      "libc++_shared.so provides the measured Android std::__ndk1 namespace",
+      "assets/data_001.xpk is required while optional advertising assets may vary"
+    ],
+    "required_symbols_or_interfaces": [
+      "libgame.so direct EGL import inventory recorded by egl-import-contract-v1",
+      "Cocos JNI lifecycle and native gamepad exports recorded by adapter-contract"
     ]
   }
 }
