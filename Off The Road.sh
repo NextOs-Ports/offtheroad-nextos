@@ -431,7 +431,7 @@ nxbootstrap_runtime_event() {
 # detected by content hash and SELF-HEALED from the chosen complete
 # generation; owner data (gamedata, saves, NEXTOSCONTROLLERS.gptk,
 # NEXTOSSETTINGS.txt) is never touched. Nothing here deletes a generation.
-NXBOOTSTRAP_GENERATION_ID=db3739a75b8e2f526fe3fe021dc1070199195f76568aec719515159ee8e52c52
+NXBOOTSTRAP_GENERATION_ID=d09c4da5ac53c62aae1f895efe51b80e187a316acf840b733ddf37790eaf0692
 NXBOOTSTRAP_GENERATION_FORMAT=2
 NXBOOTSTRAP_GENERATION_NXEXTRACT=1
 NXRUNTIME_DIR="$GAMEDIR/.nxruntime"

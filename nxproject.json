@@ -146,7 +146,7 @@
         "mode": "0755",
         "path": "offtheroad-nextos",
         "role": "executable",
-        "sha256": "deef645c549c8ffa0edbedcf27dfed2dceecd6d4a7167478882b2579f943a450"
+        "sha256": "1bfb4185bdbd7795344262b4df41ad08d287d4d4bb59705239531ebe2f11e28e"
       },
       {
         "mode": "0644",
@@ -248,7 +248,7 @@
       "kind": "payload",
       "mode": "0644",
       "path": "README.md",
-      "sha256": "95b4dd905ff64ba40e699f1261aabe07fed8750831dd9b24be8e2309eeef4fc2"
+      "sha256": "5079f47bed8f52451a7054ab9eb601fc6e55d0aa9e34c261da8a659191fe4678"
     },
     {
       "kind": "payload",
@@ -278,7 +278,7 @@
       "kind": "payload",
       "mode": "0644",
       "path": "version.txt",
-      "sha256": "d1b77b88f4b9f675a900e4143ac768a21218623cfe1703ca43162388c3271bd6"
+      "sha256": "8c54bfab7f1ae9bd1a7148eae41e7b0a8f4ad3726e0cac70f823a2d45db9e60c"
     }
   ],
   "portmaster": {

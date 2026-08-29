@@ -491,6 +491,12 @@ static float g_cursor_x = 640.0f, g_cursor_y = 360.0f;
 static bool g_cursor_pressed = false;
 static bool g_cursor_visible = false;
 static bool g_gameplay_context = false;
+/* L3 liga/desliga o modo ponteiro (desenho aprovado na 1.0.2 e pedido de volta
+ * pelo NextOS em 28/08/2026: a deteccao por cMulti nao dispara no device).
+ * Os menus do jogo sao de toque, entao o modo comeca LIGADO. */
+static bool g_cursor_mode = true;
+static float g_cursor_idle = 0.0f; /* a seta some sozinha quando nao e usada */
+#define CURSOR_IDLE_HIDE_S 2.5f
 
 static void init_cursor_renderer(void) {
   const char *vs_src =
@@ -793,6 +799,8 @@ void offtheroad_input_digital_sink(const char *action, int pressed,
     pad_button(AK_BUTTON_START, pressed != 0);
   } else if (strcmp(action, "cursor.click") == 0) {
     g_cursor_pressed = pressed != 0;
+    g_cursor_visible = true;
+    g_cursor_idle = 0.0f;
     send_touch(pressed != 0, false);
   }
 }
@@ -805,21 +813,18 @@ void offtheroad_input_vector_sink(const char *action, float x, float y) {
     pad_axis(AX_Z, x);
     pad_axis(AX_RZ, y);
   } else if (strcmp(action, "cursor.move") == 0) {
+    if (x != g_cursor_x || y != g_cursor_y) {
+      g_cursor_visible = true;
+      g_cursor_idle = 0.0f;
+    }
     g_cursor_x = x;
     g_cursor_y = y;
     send_touch(false, true);
   }
 }
 
-static bool engine_gameplay_active(void) {
-  void *multi;
-  if (e_multiSingleton == NULL || e_multiGetLocalPlayer == NULL) return false;
-  multi = *e_multiSingleton;
-  return multi != NULL && e_multiGetLocalPlayer(multi) != NULL;
-}
-
 static void update_input_context(void) {
-  bool gameplay = engine_gameplay_active();
+  bool gameplay = !g_cursor_mode;
   if (gameplay != g_gameplay_context) {
     if (g_touch_down) send_touch(false, false);
     g_cursor_pressed = false;
@@ -829,10 +834,11 @@ static void update_input_context(void) {
     pad_axis(AX_RZ, 0.0f);
     otr_gptk_set_gameplay(gameplay ? 1 : 0);
     g_gameplay_context = gameplay;
-    debugPrintf("[input] contexto GPTK: %s (cMulti local-player=%s)\n",
-                otr_gptk_context_name(), gameplay ? "sim" : "nao");
+    g_cursor_visible = !gameplay;
+    g_cursor_idle = 0.0f;
+    debugPrintf("[input] contexto GPTK: %s (modo ponteiro=%s)\n",
+                otr_gptk_context_name(), g_cursor_mode ? "ON" : "OFF");
   }
-  g_cursor_visible = !gameplay;
 }
 
 static void pump_input(float dt) {
@@ -894,8 +900,6 @@ static void pump_input(float dt) {
   pthread_mutex_unlock(&g_pad_mutex);
   if (!have_pad) return;
 
-  update_input_context();
-
   for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
     bool now = button_now[b];
     int control;
@@ -903,6 +907,15 @@ static void pump_input(float dt) {
     int ak;
     if (now == g_btn_prev[b]) continue;
     g_btn_prev[b] = now;
+    if (b == SDL_CONTROLLER_BUTTON_LEFTSTICK) {
+      /* L3 e reservado ao modo ponteiro: nao vira THUMBL nem entra no GPTK. */
+      if (now) {
+        g_cursor_mode = !g_cursor_mode;
+        debugPrintf("[input] modo ponteiro: %s\n",
+                    g_cursor_mode ? "ON" : "OFF");
+      }
+      continue;
+    }
     control = sdl_btn_to_gptk(b);
     mapped = control >= 0 && otr_gptk_button_mapped(control);
     if (control >= 0) otr_gptk_feed_button(control, now ? 1 : 0, now ? 1.0f : 0.0f);
@@ -923,6 +936,8 @@ static void pump_input(float dt) {
     }
   }
 
+  update_input_context();
+
   float lx = axis_left_x / 32767.0f;
   float ly = axis_left_y / 32767.0f;
   float rx = axis_right_x / 32767.0f;
@@ -936,8 +951,8 @@ static void pump_input(float dt) {
   if (fabsf(ry) < dz) ry = 0.0f;
 
   /* GPTK is the sole reader for each stick it owns in the live context. In
-   * cursor/menu only RIGHT_STICK is owned; once cMulti has a local player the
-   * same physical stick changes to camera.look. L3 never toggles a mode. */
+   * cursor/menu only RIGHT_STICK is owned; L3 alterna o modo ponteiro, que
+   * devolve o mesmo stick fisico a camera (camera.look) durante o gameplay. */
   otr_gptk_feed_stick(NXINPUT_GPTK_LEFT_STICK, lx, ly, dt);
   otr_gptk_feed_stick(NXINPUT_GPTK_RIGHT_STICK, rx, ry, dt);
   if (!otr_gptk_stick_owned(NXINPUT_GPTK_LEFT_STICK)) {
@@ -966,6 +981,13 @@ static void pump_input(float dt) {
       pad_axis(AX_LTRIGGER, lt < 0.0f ? 0.0f : lt);
     if (!otr_gptk_button_mapped(NXINPUT_GPTK_R2))
       pad_axis(AX_RTRIGGER, rt < 0.0f ? 0.0f : rt);
+  }
+
+  /* A seta some sozinha quando nao esta em uso.  Apenas visual: a posse do
+   * stick continua decidida pelo L3, entao a camera nunca a acorda. */
+  if (!g_gameplay_context && !g_cursor_pressed) {
+    g_cursor_idle += dt;
+    if (g_cursor_idle > CURSOR_IDLE_HIDE_S) g_cursor_visible = false;
   }
 }
 

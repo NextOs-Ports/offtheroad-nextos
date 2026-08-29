@@ -129,7 +129,7 @@
     },
     "mapping": "NEXTOSCONTROLLERS.gptk",
     "mapping_authority": "gptk-single-authority",
-    "touch": "nativeTouchesBegin/Move/End in cursor context only"
+    "touch": "nativeTouchesBegin/Move/End in cursor context only; L3 is reserved by the loader as the pointer-mode toggle and is never forwarded to the game"
   },
   "jni": {
     "callbacks": [
@@ -214,7 +214,7 @@
     "never resolve cMulti or game callbacks by binary offsets",
     "never delete or relocate saves and owner configuration while rotating shader cache",
     "never deliver a GPTK-owned control through the parallel raw path",
-    "never use L3 as a cursor-mode toggle"
+    "never decide right-stick ownership by heuristics (idle timers, trigger state, engine probes): ownership changes only on the explicit L3 toggle, and cursor auto-hide is visual only"
   ],
   "quirks": [
     "split GLVND EGL loaded RTLD_LOCAL is validated first, then reopened globally and bound through an explicit guest table",

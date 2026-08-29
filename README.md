@@ -31,20 +31,24 @@ O jogo tem suporte **nativo** a controle. O arquivo editável
 única vez aos sinks reais `cocos2d::nativeGamepad*`; os controles que o GPTK
 assume não percorrem também a rota crua.
 
-Menus e loja são de toque: nesse contexto, o analógico direito move
-continuamente uma seta, com deadzone radial, resposta progressiva e suavização;
-**R3** clica. Quando `cMulti::getLocalPlayer()` informa gameplay real, o
-analógico direito volta automaticamente para a câmera e o esquerdo para a
-direção. Não existe toggle em L3. **SELECT + START** é observado por um watcher
+O jogo é de mundo aberto e a interface é de toque, então o ponteiro é um
+**modo**, do jogo inteiro: **L3** liga e desliga a seta. Com a seta ligada, o
+analógico direito a move (deadzone radial, resposta progressiva e suavização) e
+**R3** clica; parada por ~2,5 s, ela some sozinha e reaparece ao primeiro
+movimento. Com a seta desligada, o analógico direito é só a câmera e o esquerdo
+a direção — nada de cursor na tela. O L3 é reservado ao modo e não chega ao
+jogo. **SELECT + START** é observado por um watcher
 host independente do `nativeRender`: SDL é a autoridade quando o mapping possui
 BACK e START; o fallback evdev canônico só fica ativo sem esse mapping completo.
 A entrega é sticky e única, solicita pause/stop/save e mantém um deadline
 terminal caso a engine não devolva o frame.
 
 The editable `NEXTOSCONTROLLERS.gptk` is parsed and dispatched exactly once to
-the game's native controller sinks. In touch menus the right stick moves a
-polished pointer and **R3** clicks; in real gameplay the same stick returns
-automatically to the native camera. A host watcher observes **SELECT + START**
+the game's native controller sinks. The game is open-world with a touch UI, so
+the pointer is a whole-game **mode**: **L3** toggles it. Pointer on — the right
+stick moves it, **R3** clicks, and it hides itself after ~2.5 s of inactivity;
+pointer off — the right stick is the camera alone. L3 is reserved for the
+toggle and never reaches the game. A host watcher observes **SELECT + START**
 independently from `nativeRender`, with SDL as the primary authority and the
 canonical evdev fallback only when BACK/START mapping is incomplete. It
 delivers once, then saves and exits.
